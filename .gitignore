@@ -1,5 +1,5 @@
 .build/
-Screenshotter.app/
+Device Shots.app/
 *.zip
 .DS_Store
 .swiftpm/

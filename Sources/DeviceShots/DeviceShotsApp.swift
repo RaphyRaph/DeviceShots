@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct ScreenshotterApp: App {
+struct DeviceShotsApp: App {
     @StateObject private var store = DeviceStore.shared
     @StateObject private var shortcuts = ShortcutStore.shared
 
@@ -285,7 +285,7 @@ struct SetupConfig {
         ],
         footnote: "The device will appear here automatically once connected. If it shows as “unauthorized”, the allow prompt is still waiting on the phone’s screen.",
         warning: adbPath == nil
-            ? "adb was not found on this Mac. Install it with `brew install android-platform-tools`, then relaunch Screenshotter."
+            ? "adb was not found on this Mac. Install it with `brew install android-platform-tools`, then relaunch Device Shots."
             : nil
     )
 
@@ -306,7 +306,7 @@ struct SetupConfig {
         footnote: "The device will appear here automatically once connected. After the first pairing, capture also works over Wi‑Fi when the device is on the same network.",
         warning: hasXcodeTools
             ? nil
-            : "Xcode is required to capture from iPhones, iPads, and simulators. Install it from the App Store, open it once to finish setup, then relaunch Screenshotter."
+            : "Xcode is required to capture from iPhones, iPads, and simulators. Install it from the App Store, open it once to finish setup, then relaunch Device Shots."
     )
 }
 

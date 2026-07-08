@@ -131,7 +131,7 @@ enum DeviceDiscovery {
 
     static func iosPhysicalDevices() async -> [Device] {
         guard hasXcodeTools else { return [] }
-        let jsonPath = NSTemporaryDirectory() + "screenshotter-devicectl-\(UUID().uuidString).json"
+        let jsonPath = NSTemporaryDirectory() + "deviceshots-devicectl-\(UUID().uuidString).json"
         defer { try? FileManager.default.removeItem(atPath: jsonPath) }
         let result = await runCommand(xcrunPath, ["devicectl", "list", "devices", "--quiet", "--json-output", jsonPath, "--timeout", "10"])
         guard result.succeeded,
@@ -220,7 +220,7 @@ enum DeviceDiscovery {
     }
 
     private static func captureToTempFile(_ run: (String) async -> CommandResult) async -> Result<Data, CaptureError> {
-        let path = NSTemporaryDirectory() + "screenshotter-\(UUID().uuidString).png"
+        let path = NSTemporaryDirectory() + "deviceshots-\(UUID().uuidString).png"
         defer { try? FileManager.default.removeItem(atPath: path) }
         let result = await run(path)
         guard result.succeeded else { return .failure(CaptureError(message: friendlyError(result))) }
