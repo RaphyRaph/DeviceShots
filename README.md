@@ -1,4 +1,4 @@
-# Screenshotter
+# Device Shots
 
 A tiny macOS menu-bar app that captures screenshots from connected iOS and
 Android devices straight to the clipboard. No streaming, no windows — just a
@@ -6,9 +6,9 @@ camera icon in the menu bar.
 
 ## Install
 
-Download the latest `Screenshotter-vX.Y.zip` from
-[Releases](https://github.com/RaphyRaph/Screenshotter/releases), unzip, and
-drag Screenshotter.app to /Applications. The app is notarized by Apple.
+Download the latest `DeviceShots-vX.Y.zip` from
+[Releases](https://github.com/RaphyRaph/DeviceShots/releases), unzip, and
+drag Device Shots.app to /Applications. The app is notarized by Apple.
 
 Requirements:
 
@@ -54,7 +54,7 @@ Open via the gear icon in the panel footer. Two sections:
 
 ```sh
 ./build.sh
-open Screenshotter.app
+open "Device Shots.app"
 ```
 
 Requires Xcode (for `devicectl`/`simctl` and the Swift toolchain). `adb` is
@@ -66,4 +66,4 @@ looked up in the usual Homebrew / Android SDK locations plus `$ANDROID_HOME`.
   CoreDevice tunnel is available — plug in via USB or ensure Wi-Fi debugging
   is active in Xcode.
 - To launch at login: System Settings → General → Login Items → add
-  Screenshotter.app.
+  Device Shots.app.

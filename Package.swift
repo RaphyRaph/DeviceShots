@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "Screenshotter",
+    name: "DeviceShots",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "Screenshotter", path: "Sources/Screenshotter")
+        .executableTarget(name: "DeviceShots", path: "Sources/DeviceShots")
     ]
 )
