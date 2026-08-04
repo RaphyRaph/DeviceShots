@@ -37,6 +37,48 @@ struct CommandResult {
     }
 }
 
+/// Tracks command-line tools started by the app so quitting does not leave a
+/// device discovery or screenshot process running after Device Shots exits.
+final class CommandProcessRegistry: @unchecked Sendable {
+    static let shared = CommandProcessRegistry()
+
+    private let lock = NSLock()
+    private var processes: [ObjectIdentifier: Process] = [:]
+    private var isShuttingDown = false
+
+    /// Returns false once app shutdown has begun. A process registered during
+    /// that small race window is terminated immediately.
+    func register(_ process: Process) -> Bool {
+        lock.lock()
+        let shouldRun = !isShuttingDown
+        if shouldRun {
+            processes[ObjectIdentifier(process)] = process
+        }
+        lock.unlock()
+
+        if !shouldRun { process.terminate() }
+        return shouldRun
+    }
+
+    func unregister(_ process: Process) {
+        lock.lock()
+        processes.removeValue(forKey: ObjectIdentifier(process))
+        lock.unlock()
+    }
+
+    func terminateAll() {
+        lock.lock()
+        isShuttingDown = true
+        let active = Array(processes.values)
+        processes.removeAll()
+        lock.unlock()
+
+        for process in active where process.isRunning {
+            process.terminate()
+        }
+    }
+}
+
 func runCommand(_ executable: String, _ arguments: [String]) async -> CommandResult {
     await withCheckedContinuation { continuation in
         DispatchQueue.global(qos: .userInitiated).async {
@@ -53,6 +95,11 @@ func runCommand(_ executable: String, _ arguments: [String]) async -> CommandRes
                 continuation.resume(returning: CommandResult(launchError: error.localizedDescription))
                 return
             }
+            guard CommandProcessRegistry.shared.register(process) else {
+                continuation.resume(returning: CommandResult(launchError: "Device Shots is quitting"))
+                return
+            }
+            defer { CommandProcessRegistry.shared.unregister(process) }
             let stdout = outPipe.fileHandleForReading.readDataToEndOfFile()
             let stderr = errPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
