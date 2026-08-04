@@ -3,6 +3,7 @@ import AppKit
 
 @main
 struct DeviceShotsApp: App {
+    @NSApplicationDelegateAdaptor(AppLifecycle.self) private var appLifecycle
     @StateObject private var store = DeviceStore.shared
     @StateObject private var shortcuts = ShortcutStore.shared
 
@@ -17,6 +18,25 @@ struct DeviceShotsApp: App {
         Settings {
             SettingsView()
         }
+    }
+}
+
+/// Owns the pieces of the app that are not managed by SwiftUI scenes.
+/// In particular, MenuBarExtra windows can disappear without destroying the
+/// process, so teardown must be tied to the application quit event.
+final class AppLifecycle: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        shutdown()
+        return .terminateNow
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        shutdown()
+    }
+
+    private func shutdown() {
+        HotKeyCenter.shared.unregisterAll()
+        CommandProcessRegistry.shared.terminateAll()
     }
 }
 
