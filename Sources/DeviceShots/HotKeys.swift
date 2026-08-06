@@ -8,7 +8,32 @@ struct Shortcut: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey { case keyCode, modifiers }
 
+    init(keyCode: UInt16, modifiers: UInt) {
+        self.keyCode = ShortcutKey.normalizedKeyCode(keyCode)
+        self.modifiers = Shortcut.normalizedModifiers(modifiers)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            keyCode: try container.decode(UInt16.self, forKey: .keyCode),
+            modifiers: try container.decode(UInt.self, forKey: .modifiers)
+        )
+    }
+
     var modifierFlags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
+
+    /// Numpad digits and the number row represent the same logical shortcut.
+    var physicalKeyCodes: [UInt16] { ShortcutKey.physicalKeyCodes(for: keyCode) }
+
+    private static func normalizedModifiers(_ rawValue: UInt) -> UInt {
+        let relevant: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        // This removes device-dependent bits that distinguish the left and
+        // right modifier keys, leaving only their logical meaning.
+        let independent = NSEvent.ModifierFlags(rawValue: rawValue)
+            .intersection(.deviceIndependentFlagsMask)
+        return independent.intersection(relevant).rawValue
+    }
 
     /// e.g. "⌥⇧1" — always shows the base key, not the shifted character
     var display: String {
@@ -27,6 +52,35 @@ struct Shortcut: Codable, Equatable {
         if modifierFlags.contains(.option) { carbon |= UInt32(optionKey) }
         if modifierFlags.contains(.control) { carbon |= UInt32(controlKey) }
         return carbon
+    }
+}
+
+/// Maps physical digit keys to a logical digit. Carbon hotkeys themselves are
+/// position-based, so each logical digit is registered for both locations.
+enum ShortcutKey {
+    private static let numberRowByKeypad: [UInt16: UInt16] = [
+        82: 29, // 0
+        83: 18, // 1
+        84: 19, // 2
+        85: 20, // 3
+        86: 21, // 4
+        87: 23, // 5
+        88: 22, // 6
+        89: 26, // 7
+        91: 28, // 8
+        92: 25, // 9
+    ]
+
+    static func normalizedKeyCode(_ keyCode: UInt16) -> UInt16 {
+        numberRowByKeypad[keyCode] ?? keyCode
+    }
+
+    static func physicalKeyCodes(for keyCode: UInt16) -> [UInt16] {
+        let canonical = normalizedKeyCode(keyCode)
+        guard let keypad = numberRowByKeypad.first(where: { $0.value == canonical })?.key else {
+            return [canonical]
+        }
+        return [canonical, keypad]
     }
 }
 
@@ -60,15 +114,17 @@ final class HotKeyCenter {
     }
 
     func register(_ shortcut: Shortcut, handler: @escaping () -> Void) {
-        let id = nextID
-        nextID += 1
-        var ref: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: OSType(0x53435348), id: id) // 'SCSH'
-        let status = RegisterEventHotKey(UInt32(shortcut.keyCode), shortcut.carbonModifiers,
-                                         hotKeyID, GetApplicationEventTarget(), 0, &ref)
-        guard status == noErr, let ref else { return }
-        refs[id] = ref
-        handlers[id] = handler
+        for keyCode in shortcut.physicalKeyCodes {
+            let id = nextID
+            nextID += 1
+            var ref: EventHotKeyRef?
+            let hotKeyID = EventHotKeyID(signature: OSType(0x53435348), id: id) // 'SCSH'
+            let status = RegisterEventHotKey(UInt32(keyCode), shortcut.carbonModifiers,
+                                             hotKeyID, GetApplicationEventTarget(), 0, &ref)
+            guard status == noErr, let ref else { continue }
+            refs[id] = ref
+            handlers[id] = handler
+        }
     }
 }
 
@@ -222,7 +278,9 @@ struct ShortcutRecorder: View {
 
     private func handle(_ event: NSEvent) {
         let relevant: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
-        let flags = event.modifierFlags.intersection(relevant)
+        let flags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection(relevant)
 
         if event.keyCode == 53 { // Escape cancels
             stopRecording()

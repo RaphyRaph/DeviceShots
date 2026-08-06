@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
 @main
 struct DeviceShotsApp: App {
@@ -20,11 +21,15 @@ struct DeviceShotsApp: App {
 private final class StatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
+    private let store: DeviceStore
     private var captureObserver: AnyCancellable?
     private let symbolImageView = NSImageView()
+    private var visualWindow: NSPanel?
 
     init(store: DeviceStore) {
-        popover.behavior = .transient
+        self.store = store
+        let isVisualCapture = ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_OPEN_POPOVER"] == "1"
+        popover.behavior = isVisualCapture ? .applicationDefined : .transient
         popover.contentViewController = NSHostingController(rootView: DeviceListView(store: store))
         super.init()
 
@@ -51,16 +56,43 @@ private final class StatusItemController: NSObject {
 
         let visualState = ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_STATE"]
         updateIcon(isCapturing: visualState == "capturing")
+        if ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_OPEN_POPOVER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.showVisualWindow()
+            }
+        }
     }
 
     @objc private func togglePopover() {
-        guard let button = statusItem.button else { return }
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            showPopover()
         }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button else { return }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
+    /// Stable host for the CLI visual script. `NSPopover` closes immediately
+    /// when opened programmatically by an accessory app, while this panel
+    /// renders the identical `DeviceListView` long enough to capture.
+    private func showVisualWindow() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Device Shots Visual QA"
+        panel.contentView = NSHostingView(rootView: DeviceListView(store: store))
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        visualWindow = panel
     }
 
     private func updateIcon(isCapturing: Bool) {
@@ -91,6 +123,8 @@ private final class StatusItemController: NSObject {
     func tearDown() {
         captureObserver = nil
         popover.performClose(nil)
+        visualWindow?.close()
+        visualWindow = nil
         NSStatusBar.system.removeStatusItem(statusItem)
     }
 }
@@ -127,6 +161,7 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
 @MainActor
 final class DeviceStore: ObservableObject {
     static let shared = DeviceStore()
+    private static let deviceOrderKey = "deviceOrder"
 
     @Published var devices: [Device] = []
     @Published var isRefreshing = false
@@ -137,13 +172,41 @@ final class DeviceStore: ObservableObject {
 
     var isCapturingAnyDevice: Bool { !capturing.isEmpty }
 
+    private var preferredOrder: [String] = UserDefaults.standard.stringArray(forKey: deviceOrderKey) ?? []
+
     func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
         let found = await DeviceDiscovery.allDevices()
-        devices = found
+        devices = DeviceOrder.applying(preferredOrder, to: found)
         hasLoadedOnce = true
         isRefreshing = false
+    }
+
+    /// Moves a device before another row and keeps that order across refreshes
+    /// and relaunches. Shortcut slots resolve against this same `devices` array.
+    func moveDevice(id: String, before targetID: String) {
+        let reordered = DeviceOrder.moving(devices, id: id, before: targetID)
+        guard reordered.map(\.id) != devices.map(\.id) else { return }
+        devices = reordered
+        preferredOrder = reordered.map(\.id)
+        UserDefaults.standard.set(preferredOrder, forKey: Self.deviceOrderKey)
+    }
+
+    func moveDevice(id: String, to destination: Int) {
+        let reordered = DeviceOrder.moving(devices, id: id, to: destination)
+        guard reordered.map(\.id) != devices.map(\.id) else { return }
+        devices = reordered
+        preferredOrder = reordered.map(\.id)
+        UserDefaults.standard.set(preferredOrder, forKey: Self.deviceOrderKey)
+    }
+
+    func moveDevices(from source: IndexSet, to destination: Int) {
+        let reordered = DeviceOrder.moving(devices, from: source, to: destination)
+        guard reordered.map(\.id) != devices.map(\.id) else { return }
+        devices = reordered
+        preferredOrder = reordered.map(\.id)
+        UserDefaults.standard.set(preferredOrder, forKey: Self.deviceOrderKey)
     }
 
     /// Entry point for global shortcuts: capture the Nth device in the list,
@@ -283,6 +346,14 @@ final class DeviceStore: ObservableObject {
 struct DeviceListView: View {
     @ObservedObject var store: DeviceStore
     private let refreshTimer = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
+    @State private var draggedDeviceID: String?
+
+    private var listHeight: CGFloat {
+        let setupRows = (store.devices.contains(where: { $0.kind == .ios }) ? 0 : 1)
+            + (store.devices.contains(where: { $0.kind == .android }) ? 0 : 1)
+        let rowCount = max(store.devices.count + setupRows, 1)
+        return min(CGFloat(rowCount) * 44, 320)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -330,23 +401,45 @@ struct DeviceListView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 24)
         } else {
-            VStack(spacing: 0) {
-                ForEach(Array(store.devices.enumerated()), id: \.element.id) { index, device in
-                    DeviceRow(device: device, index: index, store: store)
-                    if device != store.devices.last {
-                        Divider().padding(.leading, 12)
-                    }
+            List {
+                ForEach(store.devices) { device in
+                    DeviceRow(
+                        device: device,
+                        index: store.devices.firstIndex(of: device) ?? 0,
+                        store: store,
+                        onDragStart: { draggedDeviceID = device.id }
+                    )
+                    .listRowSeparator(.visible)
+                    .listRowSeparatorTint(.gray)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .onDrop(
+                        of: [UTType.plainText],
+                        delegate: DeviceReorderDropDelegate(
+                            target: device,
+                            store: store,
+                            draggedDeviceID: $draggedDeviceID
+                        )
+                    )
                 }
+                .onMove(perform: store.moveDevices)
+
                 if !store.devices.contains(where: { $0.kind == .ios }) {
-                    if !store.devices.isEmpty { Divider().padding(.leading, 12) }
                     PlaceholderSetupRow(config: .ios)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                 }
                 if !store.devices.contains(where: { $0.kind == .android }) {
-                    Divider().padding(.leading, 12)
                     PlaceholderSetupRow(config: .android)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                 }
             }
-            .padding(.vertical, 4)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .deviceListContentMarginsRemoved()
+            .padding(.horizontal, -8)
+            .frame(height: listHeight)
         }
     }
 
@@ -376,6 +469,47 @@ struct DeviceListView: View {
                 NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                 NSApp.activate(ignoringOtherApps: true)
             }
+        }
+    }
+}
+
+private struct DeviceReorderDropDelegate: DropDelegate {
+    let target: Device
+    @ObservedObject var store: DeviceStore
+    @Binding var draggedDeviceID: String?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedDeviceID,
+              draggedDeviceID != target.id,
+              let sourceIndex = store.devices.firstIndex(where: { $0.id == draggedDeviceID }),
+              let targetIndex = store.devices.firstIndex(where: { $0.id == target.id })
+        else { return }
+
+        if sourceIndex < targetIndex {
+            store.moveDevice(id: draggedDeviceID, to: targetIndex + 1)
+        } else {
+            store.moveDevice(id: draggedDeviceID, before: target.id)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedDeviceID = nil
+        return true
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func deviceListContentMarginsRemoved() -> some View {
+        if #available(macOS 14.0, *) {
+            self
+                .contentMargins([.top, .horizontal], 0, for: .scrollContent)
+        } else {
+            self
         }
     }
 }
@@ -528,6 +662,7 @@ struct DeviceRow: View {
     let device: Device
     let index: Int
     @ObservedObject var store: DeviceStore
+    let onDragStart: () -> Void
     @ObservedObject private var shortcuts = ShortcutStore.shared
 
     private var assignedShortcut: Shortcut? {
@@ -535,19 +670,38 @@ struct DeviceRow: View {
     }
 
 
-    @State private var isHovering = false
+    @State private var isRowHovering = false
+    @State private var isIconHovering = false
+
+    private var showsGrabber: Bool {
+        isIconHovering || (index == 0 && ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_HOVER_FIRST_DEVICE"] == "1")
+    }
 
     var body: some View {
         Button {
             Task { await store.capture(device) }
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: device.icon)
-                    .font(.title3)
-                    .foregroundStyle(device.available ? .primary : .tertiary)
-                    .frame(width: 24)
+                Group {
+                    if showsGrabber {
+                        GrabberIcon()
+                            .foregroundStyle(device.available ? .secondary : .tertiary)
+                            .help("Drag to reorder devices and shortcut positions")
+                    } else {
+                        Image(systemName: device.icon)
+                            .foregroundStyle(device.available ? .primary : .tertiary)
+                    }
+                }
+                .font(.title3)
+                .frame(width: 24, height: 24)
+                .onHover { isIconHovering = $0 }
+                .onDrag {
+                    onDragStart()
+                    return NSItemProvider(object: device.id as NSString)
+                }
 
-                VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 1) {
                     Text(device.name)
                         .fontWeight(.medium)
                         .foregroundStyle(device.available ? .primary : .secondary)
@@ -558,7 +712,7 @@ struct DeviceRow: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .foregroundStyle(status.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                     } else {
-                        Text("\(device.kind.rawValue) · \(device.detail)")
+                        Text(device.detail)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -573,21 +727,39 @@ struct DeviceRow: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                if store.capturing.contains(device.id) {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "camera.fill")
-                        .foregroundStyle(isHovering && device.available ? .primary : .secondary)
+                    if store.capturing.contains(device.id) {
+                        ProgressView().controlSize(.small)
+                    } else if isRowHovering && device.available {
+                        Image(systemName: "clipboard")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .background(isHovering && device.available ? Color.primary.opacity(0.06) : .clear)
         }
         .buttonStyle(.plain)
         .disabled(!device.available || store.capturing.contains(device.id))
-        .onHover { isHovering = $0 }
-        .help(device.available ? "Copy screenshot to clipboard" : "Device not connected")
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color.black.opacity(isRowHovering ? 0.10 : 0))
+        .animation(.easeInOut(duration: 0.12), value: isRowHovering)
+        .onHover { isRowHovering = $0 }
+        .help(device.available ? "Hover to copy screenshot" : "Device not connected")
+    }
+}
+
+/// A six-dot drag affordance, matching macOS list reordering conventions.
+private struct GrabberIcon: View {
+    var body: some View {
+        VStack(spacing: 2) {
+            ForEach(0..<3, id: \.self) { _ in
+                HStack(spacing: 2) {
+                    Circle().frame(width: 3, height: 3)
+                    Circle().frame(width: 3, height: 3)
+                }
+            }
+        }
+        .frame(width: 24, height: 24)
     }
 }
