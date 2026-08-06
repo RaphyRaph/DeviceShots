@@ -2,6 +2,58 @@ import XCTest
 @testable import DeviceShots
 
 final class DeviceDiscoveryTests: XCTestCase {
+    func testShortcutNormalizesKeypadDigitsAndSideSpecificModifierBits() {
+        let deviceSpecificBit: UInt = 1 << 8
+        let shortcut = Shortcut(
+            keyCode: 83, // keypad 1
+            modifiers: NSEvent.ModifierFlags.command.rawValue | deviceSpecificBit
+        )
+
+        XCTAssertEqual(shortcut.keyCode, 18) // number-row 1
+        XCTAssertEqual(shortcut.physicalKeyCodes, [18, 83])
+        XCTAssertEqual(shortcut.modifierFlags, [.command])
+    }
+
+    func testPreferredDeviceOrderIsAppliedAndKeepsNewDevicesAfterwards() {
+        let android = Device(id: "android", name: "Pixel", detail: "Android", kind: .android, available: true)
+        let iphone = Device(id: "iphone", name: "iPhone", detail: "iOS", kind: .ios, available: true)
+        let simulator = Device(id: "simulator", name: "Simulator", detail: "iOS", kind: .simulator, available: true)
+
+        let ordered = DeviceOrder.applying(["iphone", "android"], to: [android, simulator, iphone])
+
+        XCTAssertEqual(ordered.map(\.id), ["iphone", "android", "simulator"])
+    }
+
+    func testDeviceCanMoveBeforeAnotherRowForLiveReordering() {
+        let android = Device(id: "android", name: "Pixel", detail: "Android", kind: .android, available: true)
+        let iphone = Device(id: "iphone", name: "iPhone", detail: "iOS", kind: .ios, available: true)
+        let simulator = Device(id: "simulator", name: "Simulator", detail: "iOS", kind: .simulator, available: true)
+
+        let reordered = DeviceOrder.moving([android, iphone, simulator], id: "simulator", before: "android")
+
+        XCTAssertEqual(reordered.map(\.id), ["simulator", "android", "iphone"])
+    }
+
+    func testDeviceCanMoveToCalculatedDragDestination() {
+        let android = Device(id: "android", name: "Pixel", detail: "Android", kind: .android, available: true)
+        let iphone = Device(id: "iphone", name: "iPhone", detail: "iOS", kind: .ios, available: true)
+        let simulator = Device(id: "simulator", name: "Simulator", detail: "iOS", kind: .simulator, available: true)
+
+        let reordered = DeviceOrder.moving([android, iphone, simulator], id: "android", to: 3)
+
+        XCTAssertEqual(reordered.map(\.id), ["iphone", "simulator", "android"])
+    }
+
+    func testNativeListMovePreservesTheMovedDeviceOrder() {
+        let android = Device(id: "android", name: "Pixel", detail: "Android", kind: .android, available: true)
+        let iphone = Device(id: "iphone", name: "iPhone", detail: "iOS", kind: .ios, available: true)
+        let simulator = Device(id: "simulator", name: "Simulator", detail: "iOS", kind: .simulator, available: true)
+
+        let reordered = DeviceOrder.moving([android, iphone, simulator], from: IndexSet(integer: 0), to: 3)
+
+        XCTAssertEqual(reordered.map(\.id), ["iphone", "simulator", "android"])
+    }
+
     func testPhysicalConnectedIOSDeviceIsListed() throws {
         let data = try JSONSerialization.data(withJSONObject: [
             "result": [
@@ -35,6 +87,7 @@ final class DeviceDiscoveryTests: XCTestCase {
         XCTAssertEqual(devices.count, 1)
         XCTAssertEqual(devices[0].id, "CONNECTED-IPHONE")
         XCTAssertEqual(devices[0].name, "Test iPhone")
+        XCTAssertEqual(devices[0].detail, "iPhone 15 Pro · iOS 27")
         XCTAssertEqual(devices[0].kind, .ios)
         XCTAssertTrue(devices[0].available)
         XCTAssertFalse(devices[0].isTablet)

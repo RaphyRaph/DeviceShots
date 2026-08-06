@@ -21,6 +21,55 @@ struct Device: Identifiable, Equatable {
     var icon: String { isTablet ? "apps.ipad" : "apps.iphone" }
 }
 
+/// Stable user ordering for device rows and the shortcut positions that refer
+/// to them. Newly discovered devices remain in their discovery order after
+/// explicitly ordered devices.
+enum DeviceOrder {
+    static func applying(_ preferredIDs: [String], to discovered: [Device]) -> [Device] {
+        let positions = Dictionary(uniqueKeysWithValues: preferredIDs.enumerated().map { ($1, $0) })
+        return discovered.enumerated().sorted { lhs, rhs in
+            let lhsPosition = positions[lhs.element.id] ?? Int.max
+            let rhsPosition = positions[rhs.element.id] ?? Int.max
+            return lhsPosition == rhsPosition ? lhs.offset < rhs.offset : lhsPosition < rhsPosition
+        }.map(\.element)
+    }
+
+    static func moving(_ devices: [Device], id: String, before targetID: String) -> [Device] {
+        guard id != targetID,
+              let sourceIndex = devices.firstIndex(where: { $0.id == id })
+        else { return devices }
+
+        var reordered = devices
+        let device = reordered.remove(at: sourceIndex)
+        guard let targetIndex = reordered.firstIndex(where: { $0.id == targetID }) else { return devices }
+        reordered.insert(device, at: targetIndex)
+        return reordered
+    }
+
+    static func moving(_ devices: [Device], id: String, to destination: Int) -> [Device] {
+        guard let sourceIndex = devices.firstIndex(where: { $0.id == id }) else { return devices }
+        var reordered = devices
+        let device = reordered.remove(at: sourceIndex)
+        let adjustedDestination = destination > sourceIndex ? destination - 1 : destination
+        reordered.insert(device, at: min(max(adjustedDestination, 0), reordered.count))
+        return reordered
+    }
+
+    static func moving(_ devices: [Device], from source: IndexSet, to destination: Int) -> [Device] {
+        let moving = source.compactMap { devices.indices.contains($0) ? devices[$0] : nil }
+        guard !moving.isEmpty else { return devices }
+
+        var reordered = devices
+        for index in source.sorted(by: >) where reordered.indices.contains(index) {
+            reordered.remove(at: index)
+        }
+        let adjustment = source.filter { $0 < destination }.count
+        let insertionIndex = min(max(destination - adjustment, 0), reordered.count)
+        reordered.insert(contentsOf: moving, at: insertionIndex)
+        return reordered
+    }
+}
+
 struct CommandResult {
     var stdout = Data()
     var stderr = Data()
@@ -267,7 +316,13 @@ enum DeviceDiscovery {
                 model = String(field.dropFirst("model:".count)).replacingOccurrences(of: "_", with: " ")
             }
             let name = model.isEmpty ? serial : model
-            let detail = state == "device" ? serial : "\(serial) — \(state)"
+            let versionResult = state == "device"
+                ? await runADBCommand(["-s", serial, "shell", "getprop", "ro.build.version.release"])
+                : CommandResult()
+            let version = versionResult.succeeded
+                ? versionResult.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                : ""
+            let detail = version.isEmpty ? "Android" : "Android \(displayOSVersion(version))"
             let isTablet = ["tab", "pad", "tablet"].contains { name.lowercased().contains($0) }
             devices.append(Device(id: serial, name: name, detail: detail,
                                   kind: .android, available: state == "device",
@@ -309,7 +364,7 @@ enum DeviceDiscovery {
             let name = props["name"] as? String ?? identifier
             let marketing = hardware["marketingName"] as? String ?? "iOS device"
             let osVersion = props["osVersionNumber"] as? String ?? ""
-            let detail = osVersion.isEmpty ? marketing : "\(marketing) · iOS \(osVersion)"
+            let detail = osVersion.isEmpty ? marketing : "\(marketing) · iOS \(displayOSVersion(osVersion))"
             devices.append(Device(id: identifier, name: name, detail: detail,
                                   kind: .ios, available: true,
                                   isTablet: (hardware["deviceType"] as? String) == "iPad"))
@@ -411,4 +466,12 @@ enum DeviceDiscovery {
     private static func isPNG(_ data: Data) -> Bool {
         data.count > 8 && data.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47])
     }
+}
+
+private func displayOSVersion(_ version: String) -> String {
+    var components = version.split(separator: ".", omittingEmptySubsequences: false)
+    while components.last == "0" && components.count > 1 {
+        components.removeLast()
+    }
+    return components.joined(separator: ".")
 }
