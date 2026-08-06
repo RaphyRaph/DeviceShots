@@ -1,30 +1,111 @@
 import SwiftUI
 import AppKit
+import Combine
 
 @main
 struct DeviceShotsApp: App {
     @NSApplicationDelegateAdaptor(AppLifecycle.self) private var appLifecycle
-    @StateObject private var store = DeviceStore.shared
-    @StateObject private var shortcuts = ShortcutStore.shared
 
     var body: some Scene {
-        MenuBarExtra {
-            DeviceListView(store: store)
-        } label: {
-            Image(systemName: "camera.viewfinder")
-        }
-        .menuBarExtraStyle(.window)
-
         Settings {
             SettingsView()
         }
     }
 }
 
+/// Owns the real AppKit status item. A `MenuBarExtra` label is a SwiftUI
+/// snapshot, so embedded AppKit views can be measured as empty and symbol
+/// effects do not get a stable layer to animate in.
+@MainActor
+private final class StatusItemController: NSObject {
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let popover = NSPopover()
+    private var captureObserver: AnyCancellable?
+    private let symbolImageView = NSImageView()
+
+    init(store: DeviceStore) {
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: DeviceListView(store: store))
+        super.init()
+
+        guard let button = statusItem.button else { return }
+        button.target = self
+        button.action = #selector(togglePopover)
+        button.imagePosition = .imageOnly
+        button.toolTip = "Device Shots"
+        button.image = nil
+
+        symbolImageView.frame = button.bounds
+        symbolImageView.autoresizingMask = [.width, .height]
+        symbolImageView.imageAlignment = .alignCenter
+        symbolImageView.imageScaling = .scaleProportionallyDown
+        symbolImageView.contentTintColor = .labelColor
+        button.addSubview(symbolImageView)
+
+        captureObserver = store.$capturing
+            .map { !$0.isEmpty }
+            .removeDuplicates()
+            .sink { [weak self] isCapturing in
+                self?.updateIcon(isCapturing: isCapturing)
+            }
+
+        let visualState = ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_STATE"]
+        updateIcon(isCapturing: visualState == "capturing")
+    }
+
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    private func updateIcon(isCapturing: Bool) {
+        guard let button = statusItem.button,
+              let image = NSImage(
+                systemSymbolName: isCapturing ? "ellipsis.circle" : "camera.viewfinder",
+                accessibilityDescription: "Device Shots"
+              )?.withSymbolConfiguration(.init(pointSize: 18, weight: .regular))
+        else { return }
+
+        button.setAccessibilityLabel(isCapturing ? "Capturing screenshot" : "Device Shots")
+
+        if #available(macOS 14.0, *) {
+            symbolImageView.removeAllSymbolEffects(animated: false)
+            symbolImageView.setSymbolImage(image, contentTransition: .replace.downUp)
+            if isCapturing {
+                if #available(macOS 15.0, *) {
+                    symbolImageView.addSymbolEffect(.pulse, options: .repeat(.continuous))
+                } else {
+                    symbolImageView.addSymbolEffect(.pulse)
+                }
+            }
+        } else {
+            symbolImageView.image = image
+        }
+    }
+
+    func tearDown() {
+        captureObserver = nil
+        popover.performClose(nil)
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+}
+
 /// Owns the pieces of the app that are not managed by SwiftUI scenes.
 /// In particular, MenuBarExtra windows can disappear without destroying the
 /// process, so teardown must be tied to the application quit event.
+@MainActor
 final class AppLifecycle: NSObject, NSApplicationDelegate {
+    private var statusItemController: StatusItemController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItemController = StatusItemController(store: DeviceStore.shared)
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         shutdown()
         return .terminateNow
@@ -35,8 +116,11 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
     }
 
     private func shutdown() {
+        statusItemController?.tearDown()
+        statusItemController = nil
         HotKeyCenter.shared.unregisterAll()
         CommandProcessRegistry.shared.terminateAll()
+        ADBServerLifecycle.shared.stopIfOwned(adbPath)
     }
 }
 
@@ -50,6 +134,8 @@ final class DeviceStore: ObservableObject {
     /// Per-device transient status shown in the row: (message, isError)
     @Published var status: [String: (message: String, isError: Bool)] = [:]
     @Published var capturing: Set<String> = []
+
+    var isCapturingAnyDevice: Bool { !capturing.isEmpty }
 
     func refresh() async {
         guard !isRefreshing else { return }
@@ -68,19 +154,17 @@ final class DeviceStore: ObservableObject {
             NSSound(named: "Basso")?.play()
             return
         }
-        let succeeded = await capture(devices[index])
-        if succeeded && thenPaste {
-            simulatePaste()
-        }
+        _ = await capture(devices[index], thenPaste: thenPaste)
     }
 
-    /// Sends ⌘V to the frontmost app. Requires the Accessibility permission;
-    /// prompts for it on first use.
-    private func simulatePaste() {
+    /// Sends ⌘V to the frontmost app. Returns false when Accessibility access
+    /// is unavailable, so Capture & Paste can report that the copy succeeded
+    /// but the paste did not.
+    private func simulatePaste() -> Bool {
         let promptKey = "AXTrustedCheckOptionPrompt" as CFString
         guard AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) else {
             NSSound(named: "Basso")?.play()
-            return
+            return false
         }
         let source = CGEventSource(stateID: .combinedSessionState)
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true) // kVK_ANSI_V
@@ -89,16 +173,17 @@ final class DeviceStore: ObservableObject {
         keyUp?.flags = .maskCommand
         keyDown?.post(tap: .cghidEventTap)
         keyUp?.post(tap: .cghidEventTap)
+        return keyDown != nil && keyUp != nil
     }
 
     @discardableResult
-    func capture(_ device: Device) async -> Bool {
+    func capture(_ device: Device, thenPaste: Bool = false) async -> Bool {
         guard !capturing.contains(device.id) else { return false }
         capturing.insert(device.id)
+        defer { capturing.remove(device.id) }
         status[device.id] = ("Capturing…", false)
 
         let outcome = await DeviceDiscovery.captureScreenshot(of: device)
-        capturing.remove(device.id)
 
         let defaults = UserDefaults.standard
         let playSound = defaults.object(forKey: Prefs.playSound) == nil
@@ -112,6 +197,9 @@ final class DeviceStore: ObservableObject {
                 status[device.id] = (note, false)
                 succeeded = true
                 if playSound { NSSound(named: "Pop")?.play() }
+                if thenPaste && !simulatePaste() {
+                    status[device.id] = ("✓ Copied — paste requires Accessibility access", false)
+                }
             } catch {
                 status[device.id] = (error.localizedDescription, true)
                 NSSound(named: "Basso")?.play()
@@ -146,9 +234,10 @@ final class DeviceStore: ObservableObject {
             let directory = saveToFolder
                 ? URL(fileURLWithPath: defaults.string(forKey: Prefs.saveFolderPath) ?? Prefs.defaultFolder)
                 : FileManager.default.temporaryDirectory
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-            let base = includeDevice ? device.name : "Screenshot"
+            let base = filenameBase(device.name, includeDevice: includeDevice)
             let url = directory.appendingPathComponent("\(base) \(formatter.string(from: Date())).png")
             try png.write(to: url)
             fileURL = url
@@ -178,6 +267,16 @@ final class DeviceStore: ObservableObject {
         }
 
         return saveToFolder ? "✓ Copied · saved to folder" : "✓ Copied to clipboard"
+    }
+
+    private func filenameBase(_ deviceName: String, includeDevice: Bool) -> String {
+        guard includeDevice else { return "Screenshot" }
+        let unsafeCharacters = CharacterSet(charactersIn: "/:\u{0}")
+        let cleaned = deviceName.components(separatedBy: unsafeCharacters)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "Screenshot" : cleaned
     }
 }
 
