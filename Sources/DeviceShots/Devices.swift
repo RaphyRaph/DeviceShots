@@ -79,12 +79,55 @@ final class CommandProcessRegistry: @unchecked Sendable {
     }
 }
 
-func runCommand(_ executable: String, _ arguments: [String]) async -> CommandResult {
+/// `adb` leaves its server running after a client exits. We only stop that
+/// server if this app saw itself start it, so we never disrupt an Android
+/// development session that was already using the shared server.
+final class ADBServerLifecycle: @unchecked Sendable {
+    static let shared = ADBServerLifecycle()
+
+    private let lock = NSLock()
+    private var startedByDeviceShots = false
+
+    func recordStartup(from result: CommandResult) {
+        guard result.succeeded,
+              result.stderrText.localizedCaseInsensitiveContains("daemon started successfully")
+        else { return }
+
+        lock.lock()
+        startedByDeviceShots = true
+        lock.unlock()
+    }
+
+    func stopIfOwned(_ executable: String?) {
+        lock.lock()
+        let shouldStop = startedByDeviceShots
+        startedByDeviceShots = false
+        lock.unlock()
+
+        guard shouldStop, let executable else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["kill-server"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            // The app is already terminating; there is nothing useful to show.
+        }
+    }
+}
+
+func runCommand(_ executable: String, _ arguments: [String], environment: [String: String]? = nil) async -> CommandResult {
     await withCheckedContinuation { continuation in
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
+            if let environment {
+                process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, override in override }
+            }
             let outPipe = Pipe()
             let errPipe = Pipe()
             process.standardOutput = outPipe
@@ -100,9 +143,32 @@ func runCommand(_ executable: String, _ arguments: [String]) async -> CommandRes
                 return
             }
             defer { CommandProcessRegistry.shared.unregister(process) }
-            let stdout = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = errPipe.fileHandleForReading.readDataToEndOfFile()
+
+            // A device tool can emit a large diagnostic while it is still
+            // running. Drain both pipes concurrently so neither pipe can fill
+            // and block the child before it closes the other stream.
+            let reads = DispatchGroup()
+            let outputLock = NSLock()
+            var stdout = Data()
+            var stderr = Data()
+            reads.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                outputLock.lock()
+                stdout = data
+                outputLock.unlock()
+                reads.leave()
+            }
+            reads.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+                outputLock.lock()
+                stderr = data
+                outputLock.unlock()
+                reads.leave()
+            }
             process.waitUntilExit()
+            reads.wait()
             continuation.resume(returning: CommandResult(stdout: stdout, stderr: stderr, status: process.terminationStatus))
         }
     }
@@ -110,17 +176,44 @@ func runCommand(_ executable: String, _ arguments: [String]) async -> CommandRes
 
 let xcrunPath = "/usr/bin/xcrun"
 
-/// devicectl/simctl ship with Xcode, not macOS or the Command Line Tools.
-let hasXcodeTools: Bool = {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: xcrunPath)
-    process.arguments = ["--find", "devicectl"]
-    process.standardOutput = Pipe()
-    process.standardError = Pipe()
-    guard (try? process.run()) != nil else { return false }
-    process.waitUntilExit()
-    return process.terminationStatus == 0
+/// The app is commonly launched from Finder, where it inherits the system
+/// developer directory. That directory can point at Command Line Tools even
+/// when a full Xcode is installed, and Command Line Tools does not include
+/// devicectl. Resolve an installed Xcode directly so iPhone discovery does not
+/// depend on the user's global `xcode-select` setting.
+let xcodeDeveloperDirectory: String? = {
+    let fileManager = FileManager.default
+    var candidates: [String] = []
+    if let configured = ProcessInfo.processInfo.environment["DEVELOPER_DIR"] {
+        candidates.append(configured)
+    }
+    candidates += [
+        "/Applications/Xcode.app/Contents/Developer",
+        "/Applications/Xcode-beta.app/Contents/Developer",
+    ]
+    if let applications = try? fileManager.contentsOfDirectory(atPath: "/Applications") {
+        candidates += applications
+            .filter { $0.hasPrefix("Xcode") && $0.hasSuffix(".app") }
+            .map { "/Applications/\($0)/Contents/Developer" }
+    }
+
+    var seen = Set<String>()
+    return candidates.first { directory in
+        seen.insert(directory).inserted
+            && fileManager.isExecutableFile(atPath: directory + "/usr/bin/devicectl")
+    }
 }()
+
+/// devicectl/simctl ship with Xcode, not macOS or the Command Line Tools.
+let hasXcodeTools = xcodeDeveloperDirectory != nil
+
+func runXcodeCommand(_ arguments: [String]) async -> CommandResult {
+    guard let xcodeDeveloperDirectory else {
+        return CommandResult(launchError: "Xcode with devicectl was not found")
+    }
+    return await runCommand(xcrunPath, arguments,
+                            environment: ["DEVELOPER_DIR": xcodeDeveloperDirectory])
+}
 
 /// GUI apps don't inherit the shell PATH, so look for adb in the usual spots.
 let adbPath: String? = {
@@ -138,6 +231,15 @@ let adbPath: String? = {
     return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
 }()
 
+func runADBCommand(_ arguments: [String]) async -> CommandResult {
+    guard let adbPath else {
+        return CommandResult(launchError: "adb not found")
+    }
+    let result = await runCommand(adbPath, arguments)
+    ADBServerLifecycle.shared.recordStartup(from: result)
+    return result
+}
+
 enum DeviceDiscovery {
 
     static func allDevices() async -> [Device] {
@@ -150,8 +252,8 @@ enum DeviceDiscovery {
     // MARK: Android via adb
 
     static func androidDevices() async -> [Device] {
-        guard let adbPath else { return [] }
-        let result = await runCommand(adbPath, ["devices", "-l"])
+        guard adbPath != nil else { return [] }
+        let result = await runADBCommand(["devices", "-l"])
         guard result.succeeded else { return [] }
         var devices: [Device] = []
         for line in result.stdoutText.split(separator: "\n").dropFirst() {
@@ -180,10 +282,15 @@ enum DeviceDiscovery {
         guard hasXcodeTools else { return [] }
         let jsonPath = NSTemporaryDirectory() + "deviceshots-devicectl-\(UUID().uuidString).json"
         defer { try? FileManager.default.removeItem(atPath: jsonPath) }
-        let result = await runCommand(xcrunPath, ["devicectl", "list", "devices", "--quiet", "--json-output", jsonPath, "--timeout", "10"])
-        guard result.succeeded,
-              let data = FileManager.default.contents(atPath: jsonPath),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let result = await runXcodeCommand(["devicectl", "list", "devices", "--quiet", "--json-output", jsonPath, "--timeout", "10"])
+        guard result.succeeded, let data = FileManager.default.contents(atPath: jsonPath) else { return [] }
+        return parseIOSPhysicalDevices(from: data)
+    }
+
+    /// Kept separate from the command invocation so CoreDevice's evolving JSON
+    /// can be covered by a fixture without a physical device attached.
+    static func parseIOSPhysicalDevices(from data: Data) -> [Device] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let resultDict = root["result"] as? [String: Any],
               let deviceList = resultDict["devices"] as? [[String: Any]]
         else { return [] }
@@ -195,10 +302,10 @@ enum DeviceDiscovery {
                   let identifier = entry["identifier"] as? String else { continue }
             let props = entry["deviceProperties"] as? [String: Any] ?? [:]
             let connection = entry["connectionProperties"] as? [String: Any] ?? [:]
-            // Xcode remembers previously paired devices; only list ones that are
-            // actually reachable right now (USB or Wi-Fi tunnel).
+            // Xcode remembers previously paired devices; only list ones with
+            // a live USB or Wi-Fi tunnel right now.
             let tunnelState = connection["tunnelState"] as? String ?? "unavailable"
-            guard tunnelState != "unavailable" else { continue }
+            guard tunnelState == "connected" else { continue }
             let name = props["name"] as? String ?? identifier
             let marketing = hardware["marketingName"] as? String ?? "iOS device"
             let osVersion = props["osVersionNumber"] as? String ?? ""
@@ -214,7 +321,7 @@ enum DeviceDiscovery {
 
     static func bootedSimulators() async -> [Device] {
         guard hasXcodeTools else { return [] }
-        let result = await runCommand(xcrunPath, ["simctl", "list", "devices", "booted", "-j"])
+        let result = await runXcodeCommand(["simctl", "list", "devices", "booted", "-j"])
         guard result.succeeded,
               let root = try? JSONSerialization.jsonObject(with: result.stdout) as? [String: Any],
               let runtimes = root["devices"] as? [String: [[String: Any]]]
@@ -245,8 +352,8 @@ enum DeviceDiscovery {
     static func captureScreenshot(of device: Device) async -> Result<Data, CaptureError> {
         switch device.kind {
         case .android:
-            guard let adbPath else { return .failure(CaptureError(message: "adb not found")) }
-            let result = await runCommand(adbPath, ["-s", device.id, "exec-out", "screencap", "-p"])
+            guard adbPath != nil else { return .failure(CaptureError(message: "adb not found")) }
+            let result = await runADBCommand(["-s", device.id, "exec-out", "screencap", "-p"])
             guard result.succeeded, isPNG(result.stdout) else {
                 return .failure(CaptureError(message: result.succeeded ? "did not receive a PNG from adb" : result.errorSummary))
             }
@@ -254,14 +361,14 @@ enum DeviceDiscovery {
 
         case .ios:
             return await captureToTempFile { path in
-                await runCommand(xcrunPath, ["devicectl", "device", "capture", "screenshot",
+                await runXcodeCommand(["devicectl", "device", "capture", "screenshot",
                                              "--device", device.id, "--destination", path,
                                              "--quiet", "--timeout", "30"])
             }
 
         case .simulator:
             return await captureToTempFile { path in
-                await runCommand(xcrunPath, ["simctl", "io", device.id, "screenshot", path])
+                await runXcodeCommand(["simctl", "io", device.id, "screenshot", path])
             }
         }
     }
