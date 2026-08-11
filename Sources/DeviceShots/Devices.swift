@@ -15,7 +15,7 @@ struct Device: Identifiable, Equatable {
     let name: String
     let detail: String      // model / OS info shown as subtitle
     let kind: DeviceKind
-    let available: Bool     // false when paired but not reachable (no tunnel)
+    let available: Bool     // false when paired but not reachable right now
     var isTablet = false
 
     var icon: String { isTablet ? "apps.ipad" : "apps.iphone" }
@@ -308,10 +308,14 @@ enum DeviceDiscovery {
                   let identifier = entry["identifier"] as? String else { continue }
             let props = entry["deviceProperties"] as? [String: Any] ?? [:]
             let connection = entry["connectionProperties"] as? [String: Any] ?? [:]
-            // Xcode remembers previously paired devices; only list ones with
-            // a live USB or Wi-Fi tunnel right now.
+            // Xcode remembers previously paired devices. Prefer a live CoreDevice
+            // tunnel (USB or Wi‑Fi). On newer CoreDevice builds a plugged-in
+            // phone can still report tunnelState "disconnected" while
+            // transportType is "wired" — and screenshot capture still works.
             let tunnelState = connection["tunnelState"] as? String ?? "unavailable"
-            guard tunnelState == "connected" else { continue }
+            let transportType = connection["transportType"] as? String
+            let isReachable = tunnelState == "connected" || transportType == "wired"
+            guard isReachable else { continue }
             let name = props["name"] as? String ?? identifier
             let marketing = hardware["marketingName"] as? String ?? "iOS device"
             let osVersion = props["osVersionNumber"] as? String ?? ""

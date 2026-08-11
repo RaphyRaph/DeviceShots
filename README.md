@@ -65,8 +65,9 @@ looked up in the usual Homebrew / Android SDK locations plus `$ANDROID_HOME`.
 
 ## Notes
 
-- Physical iOS devices show "not connected" (button disabled) when no
-  CoreDevice tunnel is available — plug in via USB or ensure Wi-Fi debugging
-  is active in Xcode.
+- Physical iOS devices appear when CoreDevice reports a live tunnel, or when
+  the phone/tablet is plugged in over USB (`transportType: wired`) even if the
+  developer tunnel still says disconnected. Wi‑Fi debugging still needs an
+  active CoreDevice tunnel.
 - To launch at login: System Settings → General → Login Items → add
   Device Shots.app.

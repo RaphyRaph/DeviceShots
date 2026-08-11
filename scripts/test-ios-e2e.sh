@@ -32,16 +32,20 @@ screenshot_png=$(mktemp /private/tmp/deviceshots-e2e-screenshot.XXXXXX.png)
 trap 'rm -f "$devices_json" "$screenshot_png"' EXIT
 
 /usr/bin/xcrun devicectl list devices --quiet --json-output "$devices_json" --timeout 20
+# CoreDevice may leave tunnelState "disconnected" on a plugged-in phone while
+# still allowing screenshot capture over the wired transport.
 device_id=$(jq -r '
     .result.devices[]
     | select(.hardwareProperties.reality == "physical")
-    | select(.connectionProperties.tunnelState == "connected")
-    | select(any(.capabilities[]?; .featureIdentifier == "com.apple.coredevice.feature.capturescreenshot"))
+    | select(
+        .connectionProperties.tunnelState == "connected"
+        or .connectionProperties.transportType == "wired"
+      )
     | .identifier
 ' "$devices_json" | head -n 1)
 
 if [[ -z "$device_id" || "$device_id" == "null" ]]; then
-    print -u2 "FAIL: No connected physical iPhone or iPad with screenshot capability."
+    print -u2 "FAIL: No connected physical iPhone or iPad (wired or CoreDevice tunnel)."
     exit 1
 fi
 

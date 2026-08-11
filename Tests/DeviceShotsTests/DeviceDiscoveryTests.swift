@@ -39,9 +39,25 @@ final class DeviceDiscoveryTests: XCTestCase {
                         "connectionProperties": ["tunnelState": "connected"],
                     ],
                     [
+                        "identifier": "WIRED-WITHOUT-TUNNEL",
+                        "hardwareProperties": [
+                            "reality": "physical",
+                            "deviceType": "iPhone",
+                            "marketingName": "iPhone 15 Pro",
+                        ],
+                        "deviceProperties": ["name": "Wired iPhone", "osVersionNumber": "27.0"],
+                        "connectionProperties": [
+                            "tunnelState": "disconnected",
+                            "transportType": "wired",
+                        ],
+                    ],
+                    [
                         "identifier": "DISCONNECTED-IPAD",
                         "hardwareProperties": ["reality": "physical", "deviceType": "iPad"],
-                        "connectionProperties": ["tunnelState": "disconnected"],
+                        "connectionProperties": [
+                            "tunnelState": "disconnected",
+                            "transportType": "localNetwork",
+                        ],
                     ],
                     [
                         "identifier": "SIMULATOR",
@@ -54,12 +70,13 @@ final class DeviceDiscoveryTests: XCTestCase {
 
         let devices = DeviceDiscovery.parseIOSPhysicalDevices(from: data)
 
-        XCTAssertEqual(devices.count, 1)
-        XCTAssertEqual(devices[0].id, "CONNECTED-IPHONE")
+        XCTAssertEqual(devices.map(\.id), ["CONNECTED-IPHONE", "WIRED-WITHOUT-TUNNEL"])
         XCTAssertEqual(devices[0].name, "Test iPhone")
         XCTAssertEqual(devices[0].detail, "iPhone 15 Pro · iOS 27")
         XCTAssertEqual(devices[0].kind, .ios)
         XCTAssertTrue(devices[0].available)
         XCTAssertFalse(devices[0].isTablet)
+        XCTAssertEqual(devices[1].name, "Wired iPhone")
+        XCTAssertTrue(devices[1].available)
     }
 }
