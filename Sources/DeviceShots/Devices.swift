@@ -211,6 +211,13 @@ func runXcodeCommand(_ arguments: [String]) async -> CommandResult {
     guard let xcodeDeveloperDirectory else {
         return CommandResult(launchError: "Xcode with devicectl was not found")
     }
+    if LatencyOpts.directXcodeTools, let tool = arguments.first {
+        let binary = xcodeDeveloperDirectory + "/usr/bin/" + tool
+        if FileManager.default.isExecutableFile(atPath: binary) {
+            return await runCommand(binary, Array(arguments.dropFirst()),
+                                    environment: ["DEVELOPER_DIR": xcodeDeveloperDirectory])
+        }
+    }
     return await runCommand(xcrunPath, arguments,
                             environment: ["DEVELOPER_DIR": xcodeDeveloperDirectory])
 }
@@ -255,7 +262,14 @@ enum DeviceDiscovery {
         guard adbPath != nil else { return [] }
         let result = await runADBCommand(["devices", "-l"])
         guard result.succeeded else { return [] }
-        var devices: [Device] = []
+
+        struct Pending {
+            let serial: String
+            let state: String
+            let name: String
+        }
+
+        var pending: [Pending] = []
         for line in result.stdoutText.split(separator: "\n").dropFirst() {
             let fields = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
             guard fields.count >= 2 else { continue }
@@ -267,19 +281,52 @@ enum DeviceDiscovery {
                 model = String(field.dropFirst("model:".count)).replacingOccurrences(of: "_", with: " ")
             }
             let name = model.isEmpty ? serial : model
-            let versionResult = state == "device"
-                ? await runADBCommand(["-s", serial, "shell", "getprop", "ro.build.version.release"])
-                : CommandResult()
-            let version = versionResult.succeeded
-                ? versionResult.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
-                : ""
-            let detail = version.isEmpty ? "Android" : "Android \(displayOSVersion(version))"
-            let isTablet = ["tab", "pad", "tablet"].contains { name.lowercased().contains($0) }
-            devices.append(Device(id: serial, name: name, detail: detail,
-                                  kind: .android, available: state == "device",
-                                  isTablet: isTablet))
+            pending.append(Pending(serial: serial, state: state, name: name))
         }
-        return devices
+
+        let versions: [String]
+        if LatencyOpts.parallelGetprop {
+            versions = await withTaskGroup(of: (Int, String).self, returning: [String].self) { group in
+                for (index, item) in pending.enumerated() {
+                    group.addTask {
+                        guard item.state == "device" else { return (index, "") }
+                        let versionResult = await runADBCommand(["-s", item.serial, "shell", "getprop", "ro.build.version.release"])
+                        let version = versionResult.succeeded
+                            ? versionResult.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            : ""
+                        return (index, version)
+                    }
+                }
+                var collected = Array(repeating: "", count: pending.count)
+                for await (index, version) in group {
+                    collected[index] = version
+                }
+                return collected
+            }
+        } else {
+            var collected: [String] = []
+            for item in pending {
+                if item.state == "device" {
+                    let versionResult = await runADBCommand(["-s", item.serial, "shell", "getprop", "ro.build.version.release"])
+                    collected.append(
+                        versionResult.succeeded
+                            ? versionResult.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            : ""
+                    )
+                } else {
+                    collected.append("")
+                }
+            }
+            versions = collected
+        }
+
+        return zip(pending, versions).map { item, version in
+            let detail = version.isEmpty ? "Android" : "Android \(displayOSVersion(version))"
+            let isTablet = ["tab", "pad", "tablet"].contains { item.name.lowercased().contains($0) }
+            return Device(id: item.serial, name: item.name, detail: detail,
+                          kind: .android, available: item.state == "device",
+                          isTablet: isTablet)
+        }
     }
 
     // MARK: Physical iOS devices via devicectl
@@ -288,7 +335,7 @@ enum DeviceDiscovery {
         guard hasXcodeTools else { return [] }
         let jsonPath = NSTemporaryDirectory() + "deviceshots-devicectl-\(UUID().uuidString).json"
         defer { try? FileManager.default.removeItem(atPath: jsonPath) }
-        let result = await runXcodeCommand(["devicectl", "list", "devices", "--quiet", "--json-output", jsonPath, "--timeout", "10"])
+        let result = await runXcodeCommand(["devicectl", "list", "devices", "--quiet", "--json-output", jsonPath, "--timeout", "\(LatencyOpts.discoveryTimeoutSeconds)"])
         guard result.succeeded, let data = FileManager.default.contents(atPath: jsonPath) else { return [] }
         return parseIOSPhysicalDevices(from: data)
     }
@@ -357,17 +404,13 @@ enum DeviceDiscovery {
         return devices.sorted { $0.name < $1.name }
     }
 
-    // MARK: Screenshot capture — returns PNG data
+    // MARK: Screenshot capture — returns PNG or JPEG data
 
     static func captureScreenshot(of device: Device) async -> Result<Data, CaptureError> {
         switch device.kind {
         case .android:
             guard adbPath != nil else { return .failure(CaptureError(message: "adb not found")) }
-            let result = await runADBCommand(["-s", device.id, "exec-out", "screencap", "-p"])
-            guard result.succeeded, isPNG(result.stdout) else {
-                return .failure(CaptureError(message: result.succeeded ? "did not receive a PNG from adb" : result.errorSummary))
-            }
-            return .success(result.stdout)
+            return await captureAndroidScreenshot(deviceID: device.id)
 
         case .ios:
             return await captureToTempFile { path in
@@ -381,6 +424,28 @@ enum DeviceDiscovery {
                 await runXcodeCommand(["simctl", "io", device.id, "screenshot", path])
             }
         }
+    }
+
+    /// Prefers JPEG when configured (default); falls back to PNG if `-j` isn't supported.
+    private static func captureAndroidScreenshot(deviceID: String) async -> Result<Data, CaptureError> {
+        let preferJPEG = Prefs.androidCaptureFormatValue == .jpeg
+        if preferJPEG {
+            let jpeg = await runADBCommand(["-s", deviceID, "exec-out", "screencap", "-j"])
+            if jpeg.succeeded, isJPEG(jpeg.stdout) {
+                return .success(jpeg.stdout)
+            }
+        }
+
+        let png = await runADBCommand(["-s", deviceID, "exec-out", "screencap", "-p"])
+        guard png.succeeded, isPNG(png.stdout) else {
+            if !png.succeeded {
+                return .failure(CaptureError(message: png.errorSummary))
+            }
+            return .failure(CaptureError(message: preferJPEG
+                ? "did not receive a JPEG or PNG from adb"
+                : "did not receive a PNG from adb"))
+        }
+        return .success(png.stdout)
     }
 
     private static func captureToTempFile(_ run: (String) async -> CommandResult) async -> Result<Data, CaptureError> {
@@ -420,6 +485,10 @@ enum DeviceDiscovery {
 
     private static func isPNG(_ data: Data) -> Bool {
         data.count > 8 && data.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47])
+    }
+
+    private static func isJPEG(_ data: Data) -> Bool {
+        data.count > 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF
     }
 }
 

@@ -13,16 +13,34 @@ enum ClipboardMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum AndroidCaptureFormat: String, CaseIterable, Identifiable {
+    case jpeg, png
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .jpeg: return "JPEG (faster)"
+        case .png: return "PNG (lossless)"
+        }
+    }
+}
+
 enum Prefs {
     static let clipboardMode = "clipboardMode"
     static let saveToFolder = "saveToFolder"
     static let saveFolderPath = "saveFolderPath"
     static let filenameIncludesDevice = "filenameIncludesDevice"
     static let playSound = "playSound"
+    static let androidCaptureFormat = "androidCaptureFormat"
 
     static var defaultFolder: String {
         (FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser).path
+    }
+
+    /// Defaults to JPEG when unset — faster on-device encode than PNG.
+    static var androidCaptureFormatValue: AndroidCaptureFormat {
+        let raw = UserDefaults.standard.string(forKey: androidCaptureFormat) ?? AndroidCaptureFormat.jpeg.rawValue
+        return AndroidCaptureFormat(rawValue: raw) ?? .jpeg
     }
 }
 
@@ -84,6 +102,7 @@ struct CaptureSettingsView: View {
     @AppStorage(Prefs.saveFolderPath) private var saveFolderPath = Prefs.defaultFolder
     @AppStorage(Prefs.filenameIncludesDevice) private var filenameIncludesDevice = true
     @AppStorage(Prefs.playSound) private var playSound = true
+    @AppStorage(Prefs.androidCaptureFormat) private var androidCaptureFormat = AndroidCaptureFormat.jpeg.rawValue
 
     var body: some View {
         Form {
@@ -95,6 +114,16 @@ struct CaptureSettingsView: View {
                 }
                 .pickerStyle(.menu)
                 Text("Adjust this option if you've encountered any issues with pasting from clipboard or clipboard managers.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker("Android format", selection: $androidCaptureFormat) {
+                    ForEach(AndroidCaptureFormat.allCases) { format in
+                        Text(format.label).tag(format.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                Text("JPEG is usually faster to capture. Falls back to PNG if the device doesn’t support JPEG screencap.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -133,7 +162,8 @@ struct CaptureSettingsView: View {
 
     private var filenameExample: String {
         let name = filenameIncludesDevice ? "iPhone 15 Pro" : "Screenshot"
-        return "Example: \(name) 2026-07-08 at 14.30.52.png"
+        let ext = androidCaptureFormat == AndroidCaptureFormat.jpeg.rawValue ? "jpg" : "png"
+        return "Example: \(name) 2026-07-08 at 14.30.52.\(ext)"
     }
 
     private func chooseFolder() {

@@ -1,0 +1,27 @@
+{
+  "description": "Latency budgets for scripts/test-capture-latency.sh. Calibrated 2026-08-11 on Pixel 10 Pro (USB) and iPhone 15 Pro (wired): Android clipboard median ~725ms / max ~1260ms; iOS clipboard median ~651ms / max ~657ms; app delivery overhead median ~2–3ms; paste delta usually <1ms (occasional ~30ms).",
+  "app": {
+    "deliveryOverheadMedianMs": 25,
+    "deliveryOverheadMaxMs": 75,
+    "pasteDeltaMedianMs": 50,
+    "pasteDeltaMaxMs": 100
+  },
+  "android": {
+    "clipboardMedianMs": 1500,
+    "clipboardMaxMs": 3000,
+    "pasteMedianMs": 1600,
+    "pasteMaxMs": 3100
+  },
+  "ios": {
+    "clipboardMedianMs": 1500,
+    "clipboardMaxMs": 3000,
+    "pasteMedianMs": 1600,
+    "pasteMaxMs": 3100
+  },
+  "simulator": {
+    "clipboardMedianMs": 2000,
+    "clipboardMaxMs": 4000,
+    "pasteMedianMs": 2100,
+    "pasteMaxMs": 4100
+  }
+}

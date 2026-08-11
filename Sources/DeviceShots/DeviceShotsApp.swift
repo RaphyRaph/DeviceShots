@@ -209,6 +209,7 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItemController = StatusItemController(store: DeviceStore.shared)
+        CaptureLatencyBench.runIfRequested()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -239,6 +240,8 @@ final class DeviceStore: ObservableObject {
     @Published var status: [String: (message: String, isError: Bool)] = [:]
     @Published var capturing: Set<String> = []
     @Published private(set) var errorFeedbackSequence = 0
+    /// Bumped on each clipboard delivery so deferred TIFF writes don't clobber a newer capture.
+    private var deliveryGeneration = 0
 
     var isCapturingAnyDevice: Bool { !capturing.isEmpty }
 
@@ -253,8 +256,11 @@ final class DeviceStore: ObservableObject {
 
     /// Entry point for global shortcuts: capture the Nth device in the list,
     /// optionally pasting into the frontmost app afterwards.
+    /// Uses the cached device list so hotkeys don't wait on rediscovery; loads once if needed.
     func captureDevice(at index: Int, thenPaste: Bool = false) async {
-        await refresh()
+        if LatencyOpts.forceHotkeyRefresh || !hasLoadedOnce {
+            await refresh()
+        }
         guard devices.indices.contains(index), devices[index].available else {
             signalError()
             return
@@ -331,63 +337,176 @@ final class DeviceStore: ObservableObject {
     }
 
     /// Applies the capture preferences: clipboard mode, optional save to folder.
-    /// Returns the status message to show.
-    private func deliver(_ png: Data, from device: Device) throws -> String {
+    /// Puts the image on the pasteboard first so paste/sound aren't blocked by TIFF encode or folder I/O.
+    func deliver(_ imageData: Data, from device: Device) throws -> String {
         let defaults = UserDefaults.standard
         let mode = ClipboardMode(rawValue: defaults.string(forKey: Prefs.clipboardMode) ?? "") ?? .image
         let saveToFolder = defaults.bool(forKey: Prefs.saveToFolder)
         let includeDevice = defaults.object(forKey: Prefs.filenameIncludesDevice) == nil
             || defaults.bool(forKey: Prefs.filenameIncludesDevice)
+        let format = ScreenshotFormat.detect(imageData)
 
-        var fileURL: URL?
-        if saveToFolder || mode != .image {
-            let directory = saveToFolder
-                ? URL(fileURLWithPath: defaults.string(forKey: Prefs.saveFolderPath) ?? Prefs.defaultFolder)
-                : FileManager.default.temporaryDirectory
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-            let base = filenameBase(device.name, includeDevice: includeDevice)
-            let url = directory.appendingPathComponent("\(base) \(formatter.string(from: Date())).png")
-            try png.write(to: url)
-            fileURL = url
-        }
+        deliveryGeneration &+= 1
+        let generation = deliveryGeneration
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         switch mode {
         case .image:
-            pasteboard.declareTypes([.png, .tiff], owner: nil)
-            pasteboard.setData(png, forType: .png)
-            if let image = NSImage(data: png), let tiff = image.tiffRepresentation {
-                pasteboard.setData(tiff, forType: .tiff)
+            switch LatencyOpts.tiffMode {
+            case .skip:
+                pasteboard.declareTypes([format.pasteboardType], owner: nil)
+                pasteboard.setData(imageData, forType: format.pasteboardType)
+                if saveToFolder {
+                    Task.detached(priority: .utility) {
+                        _ = try? writeScreenshotFile(
+                            imageData,
+                            format: format,
+                            deviceName: device.name,
+                            includeDevice: includeDevice,
+                            saveToFolder: true
+                        )
+                    }
+                }
+            case .deferred:
+                pasteboard.declareTypes([format.pasteboardType], owner: nil)
+                pasteboard.setData(imageData, forType: format.pasteboardType)
+                scheduleDeferredImageExtras(
+                    imageData: imageData,
+                    format: format,
+                    deviceName: device.name,
+                    includeDevice: includeDevice,
+                    saveToFolder: saveToFolder,
+                    generation: generation
+                )
+            case .sync:
+                pasteboard.declareTypes([format.pasteboardType, .tiff], owner: nil)
+                pasteboard.setData(imageData, forType: format.pasteboardType)
+                if let image = NSImage(data: imageData), let tiff = image.tiffRepresentation {
+                    pasteboard.setData(tiff, forType: .tiff)
+                }
+                if saveToFolder {
+                    _ = try writeScreenshotFile(
+                        imageData,
+                        format: format,
+                        deviceName: device.name,
+                        includeDevice: includeDevice,
+                        saveToFolder: true
+                    )
+                }
             }
         case .file:
-            if let fileURL { pasteboard.writeObjects([fileURL as NSURL]) }
+            let fileURL = try writeScreenshotFile(
+                imageData,
+                format: format,
+                deviceName: device.name,
+                includeDevice: includeDevice,
+                saveToFolder: saveToFolder
+            )
+            pasteboard.writeObjects([fileURL as NSURL])
         case .both:
+            // File URL must exist before the pasteboard item is published; TIFF is skipped
+            // here because amending an already-written NSPasteboardItem is unreliable.
+            let fileURL = try writeScreenshotFile(
+                imageData,
+                format: format,
+                deviceName: device.name,
+                includeDevice: includeDevice,
+                saveToFolder: saveToFolder
+            )
             let item = NSPasteboardItem()
-            item.setData(png, forType: .png)
-            if let image = NSImage(data: png), let tiff = image.tiffRepresentation {
-                item.setData(tiff, forType: .tiff)
-            }
-            if let fileURL {
-                item.setString(fileURL.absoluteString, forType: .fileURL)
-            }
+            item.setData(imageData, forType: format.pasteboardType)
+            item.setString(fileURL.absoluteString, forType: .fileURL)
             pasteboard.writeObjects([item])
         }
 
         return saveToFolder ? "✓ Copied · saved to folder" : "✓ Copied to clipboard"
     }
 
-    private func filenameBase(_ deviceName: String, includeDevice: Bool) -> String {
-        guard includeDevice else { return "Screenshot" }
-        let unsafeCharacters = CharacterSet(charactersIn: "/:\u{0}")
-        let cleaned = deviceName.components(separatedBy: unsafeCharacters)
-            .filter { !$0.isEmpty }
-            .joined(separator: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "Screenshot" : cleaned
+    /// TIFF re-encode and optional folder save run after the image is already pasteable.
+    private func scheduleDeferredImageExtras(
+        imageData: Data,
+        format: ScreenshotFormat,
+        deviceName: String,
+        includeDevice: Bool,
+        saveToFolder: Bool,
+        generation: Int
+    ) {
+        Task { @MainActor [weak self] in
+            // Let capture() finish Pop / ⌘V before spending main-thread time on TIFF.
+            await Task.yield()
+            guard let self, self.deliveryGeneration == generation else { return }
+            if let image = NSImage(data: imageData), let tiff = image.tiffRepresentation {
+                NSPasteboard.general.setData(tiff, forType: .tiff)
+            }
+        }
+        if saveToFolder {
+            Task.detached(priority: .utility) {
+                _ = try? writeScreenshotFile(
+                    imageData,
+                    format: format,
+                    deviceName: deviceName,
+                    includeDevice: includeDevice,
+                    saveToFolder: true
+                )
+            }
+        }
     }
+}
+
+private enum ScreenshotFormat {
+    case png, jpeg
+
+    static func detect(_ data: Data) -> ScreenshotFormat {
+        if data.count > 3, data[0] == 0xFF, data[1] == 0xD8, data[2] == 0xFF {
+            return .jpeg
+        }
+        return .png
+    }
+
+    var pasteboardType: NSPasteboard.PasteboardType {
+        switch self {
+        case .png: return .png
+        case .jpeg: return NSPasteboard.PasteboardType("public.jpeg")
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .png: return "png"
+        case .jpeg: return "jpg"
+        }
+    }
+}
+
+private func writeScreenshotFile(
+    _ data: Data,
+    format: ScreenshotFormat,
+    deviceName: String,
+    includeDevice: Bool,
+    saveToFolder: Bool
+) throws -> URL {
+    let defaults = UserDefaults.standard
+    let directory = saveToFolder
+        ? URL(fileURLWithPath: defaults.string(forKey: Prefs.saveFolderPath) ?? Prefs.defaultFolder)
+        : FileManager.default.temporaryDirectory
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+    let base = screenshotFilenameBase(deviceName, includeDevice: includeDevice)
+    let url = directory.appendingPathComponent("\(base) \(formatter.string(from: Date())).\(format.fileExtension)")
+    try data.write(to: url)
+    return url
+}
+
+private func screenshotFilenameBase(_ deviceName: String, includeDevice: Bool) -> String {
+    guard includeDevice else { return "Screenshot" }
+    let unsafeCharacters = CharacterSet(charactersIn: "/:\u{0}")
+    let cleaned = deviceName.components(separatedBy: unsafeCharacters)
+        .filter { !$0.isEmpty }
+        .joined(separator: "-")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return cleaned.isEmpty ? "Screenshot" : cleaned
 }
 
 struct DeviceListView: View {
