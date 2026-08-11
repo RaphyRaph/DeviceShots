@@ -1,8 +1,11 @@
 # Device Shots
 
 A tiny macOS menu-bar app that captures screenshots from connected iOS and
-Android devices straight to the clipboard. No streaming, no windows — just a
+Android devices straight to the clipboard. No streaming, no windows... just a
 camera icon in the menu bar.
+
+Great for pasting UI screenshots in Figma for QA, or referencing screenshots and sharing them in chats. 
+Much faster than native screenshot flows.
 
 ## Install
 
