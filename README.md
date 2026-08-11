@@ -19,8 +19,9 @@ Requirements:
 ## Usage
 
 Click the camera-viewfinder icon in the menu bar. A native macOS menu lists
-every detected device; select one to copy its current screen to the clipboard
-as PNG. A "Pop" sound confirms the copy, and the next menu opening shows the
+every detected device; select one to copy its current screen to the clipboard.
+A brief "Capturing…" HUD appears at the top of the screen while the capture
+runs, then a "Pop" sound confirms the copy. The next menu opening shows the
 result beside that device. The menu also includes refresh, setup guidance,
 Settings, and Quit.
 
@@ -42,16 +43,18 @@ Open via **Settings…** in the menu. Two sections:
 
 - **Capture** — what a capture produces:
   - *Copy to clipboard*: Image only, File only, or Image and file (file mode
-    puts a PNG file on the pasteboard, e.g. for pasting into Finder or Slack)
+    puts an image file on the pasteboard, e.g. for pasting into Finder or Slack)
+  - *Android format*: JPEG (faster, default) or PNG (lossless)
   - *Save a copy to folder* with a chooseable destination
   - *Include device name in filename* (e.g. `iPhone 15 Pro 2026-07-08 at 14.30.52.png`)
   - *Play sound after capture*
-- **Shortcuts** — global hotkeys for **Capture Device 1…6**. Each shortcut
-  captures the device at that discovery position in the menu (top to bottom);
-  the assigned shortcut is shown next to the device. Click "Record shortcut"
-  and type a combination; Esc cancels, Delete clears. Hotkeys work
-  system-wide without opening the panel (Carbon `RegisterEventHotKey`, no
-  accessibility permission needed).
+- **Shortcuts** — global hotkeys for **Capture** and **Capture & Paste** on
+  devices 1…6. Each shortcut targets the device at that discovery position in
+  the menu (top to bottom); the assigned shortcut is shown next to the device.
+  Click "Record shortcut" and type a combination; Esc cancels, Delete clears.
+  Capture works system-wide without opening the menu (Carbon
+  `RegisterEventHotKey`). Capture & Paste also posts ⌘V into the frontmost app
+  and prompts for Accessibility permission on first use.
 
 ## Building
 
