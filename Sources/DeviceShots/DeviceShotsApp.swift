@@ -124,22 +124,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         image.isTemplate = true
         button.setAccessibilityLabel(isCapturing ? "Capturing screenshot" : "Device Shots")
         button.image = image
-
-        // Keep the image owned by NSStatusBarButton. A custom overlay does not
-        // receive the system's inactive-display tint, which leaves this icon
-        // bright while every native status item dims.
-        button.wantsLayer = true
         button.layer?.removeAnimation(forKey: "capturePulse")
-        if isCapturing {
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 1.0
-            pulse.toValue = 0.45
-            pulse.duration = 0.65
-            pulse.autoreverses = true
-            pulse.repeatCount = .infinity
-            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            button.layer?.add(pulse, forKey: "capturePulse")
-        }
     }
 
     private func shakeIcon() {
@@ -196,6 +181,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         captureObserver = nil
         errorObserver = nil
         menu.delegate = nil
+        CaptureHUD.shared.tearDown()
         NSStatusBar.system.removeStatusItem(statusItem)
     }
 }
@@ -291,8 +277,12 @@ final class DeviceStore: ObservableObject {
     func capture(_ device: Device, thenPaste: Bool = false) async -> Bool {
         guard !capturing.contains(device.id) else { return false }
         capturing.insert(device.id)
-        defer { capturing.remove(device.id) }
+        defer {
+            capturing.remove(device.id)
+            CaptureHUD.shared.hide()
+        }
         status[device.id] = ("Capturing…", false)
+        CaptureHUD.shared.show(for: device)
 
         let outcome = await DeviceDiscovery.captureScreenshot(of: device)
 
