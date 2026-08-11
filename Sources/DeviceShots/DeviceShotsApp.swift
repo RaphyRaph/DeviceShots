@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 import Combine
-import UniformTypeIdentifiers
 
 @main
 struct DeviceShotsApp: App {
@@ -14,117 +13,189 @@ struct DeviceShotsApp: App {
     }
 }
 
-/// Owns the real AppKit status item. A `MenuBarExtra` label is a SwiftUI
-/// snapshot, so embedded AppKit views can be measured as empty and symbol
-/// effects do not get a stable layer to animate in.
+/// Owns the native menu-bar item and its dynamic AppKit menu.
 @MainActor
-private final class StatusItemController: NSObject {
+private final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    private let popover = NSPopover()
+    private let menu = NSMenu()
     private let store: DeviceStore
+    private var storeObserver: AnyCancellable?
     private var captureObserver: AnyCancellable?
-    private let symbolImageView = NSImageView()
-    private var visualWindow: NSPanel?
+    private var errorObserver: AnyCancellable?
 
     init(store: DeviceStore) {
         self.store = store
-        let isVisualCapture = ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_OPEN_POPOVER"] == "1"
-        popover.behavior = isVisualCapture ? .applicationDefined : .transient
-        popover.contentViewController = NSHostingController(rootView: DeviceListView(store: store))
         super.init()
 
         guard let button = statusItem.button else { return }
-        button.target = self
-        button.action = #selector(togglePopover)
         button.imagePosition = .imageOnly
         button.toolTip = "Device Shots"
-        button.image = nil
+        statusItem.menu = menu
+        menu.delegate = self
 
-        symbolImageView.frame = button.bounds
-        symbolImageView.autoresizingMask = [.width, .height]
-        symbolImageView.imageAlignment = .alignCenter
-        symbolImageView.imageScaling = .scaleProportionallyDown
-        symbolImageView.contentTintColor = .labelColor
-        button.addSubview(symbolImageView)
-
+        storeObserver = Publishers.CombineLatest3(store.$devices, store.$status, store.$capturing)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _, _ in
+                self?.rebuildMenu()
+            }
         captureObserver = store.$capturing
             .map { !$0.isEmpty }
             .removeDuplicates()
             .sink { [weak self] isCapturing in
                 self?.updateIcon(isCapturing: isCapturing)
             }
+        errorObserver = store.$errorFeedbackSequence
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.shakeIcon()
+            }
 
-        let visualState = ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_STATE"]
-        updateIcon(isCapturing: visualState == "capturing")
-        if ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_OPEN_POPOVER"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.showVisualWindow()
+        rebuildMenu()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuildMenu()
+        Task { await store.refresh() }
+    }
+
+    private func rebuildMenu() {
+        menu.removeAllItems()
+
+        let header = NSMenuItem(title: store.isRefreshing ? "Refreshing devices…" : "Connected Devices", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        if store.devices.isEmpty {
+            let empty = NSMenuItem(title: store.hasLoadedOnce ? "No devices detected" : "Looking for devices…", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for (index, device) in store.devices.enumerated() {
+                let item = NSMenuItem(title: deviceTitle(device, index: index), action: #selector(capture(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = device
+                item.isEnabled = device.available && !store.capturing.contains(device.id)
+                item.image = NSImage(systemSymbolName: device.icon, accessibilityDescription: device.name)
+                let subtitle = deviceSubtitle(device)
+                if #available(macOS 14.4, *) {
+                    item.subtitle = subtitle
+                } else {
+                    item.title += " — \(subtitle)"
+                }
+                item.toolTip = device.available ? "Capture" : "Device not connected"
+                menu.addItem(item)
             }
         }
+
+        menu.addItem(.separator())
+        addSetupItem(for: .ios, whenMissingFrom: menu)
+        addSetupItem(for: .android, whenMissingFrom: menu)
+
+        menu.addItem(.separator())
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        let quit = NSMenuItem(title: "Quit Device Shots", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
     }
 
-    @objc private func togglePopover() {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            showPopover()
-        }
+    private func deviceTitle(_ device: Device, index: Int) -> String {
+        let shortcut = ShortcutStore.shared.captureShortcuts.indices.contains(index)
+            ? ShortcutStore.shared.captureShortcuts[index]?.display
+            : nil
+        let shortcutSuffix = shortcut.map { "\t\($0)" } ?? ""
+        return "\(device.name)\(shortcutSuffix)"
     }
 
-    private func showPopover() {
-        guard let button = statusItem.button else { return }
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
-    }
-
-    /// Stable host for the CLI visual script. `NSPopover` closes immediately
-    /// when opened programmatically by an accessory app, while this panel
-    /// renders the identical `DeviceListView` long enough to capture.
-    private func showVisualWindow() {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 360),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        panel.title = "Device Shots Visual QA"
-        panel.contentView = NSHostingView(rootView: DeviceListView(store: store))
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        visualWindow = panel
+    private func deviceSubtitle(_ device: Device) -> String {
+        store.status[device.id]?.message ?? (device.available ? device.detail : "Not connected")
     }
 
     private func updateIcon(isCapturing: Bool) {
         guard let button = statusItem.button,
               let image = NSImage(
-                systemSymbolName: isCapturing ? "ellipsis.circle" : "camera.viewfinder",
+                systemSymbolName: "camera.viewfinder",
                 accessibilityDescription: "Device Shots"
               )?.withSymbolConfiguration(.init(pointSize: 18, weight: .regular))
         else { return }
 
+        image.isTemplate = true
         button.setAccessibilityLabel(isCapturing ? "Capturing screenshot" : "Device Shots")
+        button.image = image
 
-        if #available(macOS 14.0, *) {
-            symbolImageView.removeAllSymbolEffects(animated: false)
-            symbolImageView.setSymbolImage(image, contentTransition: .replace.downUp)
-            if isCapturing {
-                if #available(macOS 15.0, *) {
-                    symbolImageView.addSymbolEffect(.pulse, options: .repeat(.continuous))
-                } else {
-                    symbolImageView.addSymbolEffect(.pulse)
-                }
-            }
-        } else {
-            symbolImageView.image = image
+        // Keep the image owned by NSStatusBarButton. A custom overlay does not
+        // receive the system's inactive-display tint, which leaves this icon
+        // bright while every native status item dims.
+        button.wantsLayer = true
+        button.layer?.removeAnimation(forKey: "capturePulse")
+        if isCapturing {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1.0
+            pulse.toValue = 0.45
+            pulse.duration = 0.65
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            button.layer?.add(pulse, forKey: "capturePulse")
         }
     }
 
+    private func shakeIcon() {
+        guard let button = statusItem.button else { return }
+        button.wantsLayer = true
+
+        let shake = CAKeyframeAnimation(keyPath: "position.x")
+        shake.values = [0, -4, 4, -3, 3, -2, 2, 0]
+        shake.keyTimes = [0, 0.12, 0.24, 0.38, 0.52, 0.66, 0.80, 1]
+        shake.duration = 0.42
+        shake.isAdditive = true
+        shake.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        button.layer?.add(shake, forKey: "errorShake")
+    }
+
+    private func addSetupItem(for kind: DeviceKind, whenMissingFrom menu: NSMenu) {
+        guard !store.devices.contains(where: { $0.kind == kind }) else { return }
+        let config = kind == .ios ? SetupConfig.ios : SetupConfig.android
+        let item = NSMenuItem(title: "Set up \(config.title)…", action: #selector(showSetup(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = config
+        menu.addItem(item)
+    }
+
+    @objc private func capture(_ sender: NSMenuItem) {
+        guard let device = sender.representedObject as? Device else { return }
+        Task { await store.capture(device) }
+    }
+
+    @objc private func showSettings(_ sender: NSMenuItem) {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func showSetup(_ sender: NSMenuItem) {
+        guard let config = sender.representedObject as? SetupConfig else { return }
+        let alert = NSAlert()
+        alert.messageText = "Set up \(config.title)"
+        var stepNumber = 0
+        let instructions = config.sections.map { section in
+            let steps = section.steps.map { step -> String in
+                stepNumber += 1
+                return "\(stepNumber). \(step)"
+            }
+            return ([section.header] + steps).joined(separator: "\n")
+        }
+        alert.informativeText = (instructions + [config.warning ?? config.footnote]).joined(separator: "\n\n")
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     func tearDown() {
+        storeObserver = nil
         captureObserver = nil
-        popover.performClose(nil)
-        visualWindow?.close()
-        visualWindow = nil
+        errorObserver = nil
+        menu.delegate = nil
         NSStatusBar.system.removeStatusItem(statusItem)
     }
 }
@@ -161,52 +232,23 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
 @MainActor
 final class DeviceStore: ObservableObject {
     static let shared = DeviceStore()
-    private static let deviceOrderKey = "deviceOrder"
-
     @Published var devices: [Device] = []
     @Published var isRefreshing = false
     @Published var hasLoadedOnce = false
     /// Per-device transient status shown in the row: (message, isError)
     @Published var status: [String: (message: String, isError: Bool)] = [:]
     @Published var capturing: Set<String> = []
+    @Published private(set) var errorFeedbackSequence = 0
 
     var isCapturingAnyDevice: Bool { !capturing.isEmpty }
-
-    private var preferredOrder: [String] = UserDefaults.standard.stringArray(forKey: deviceOrderKey) ?? []
 
     func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
         let found = await DeviceDiscovery.allDevices()
-        devices = DeviceOrder.applying(preferredOrder, to: found)
+        devices = found
         hasLoadedOnce = true
         isRefreshing = false
-    }
-
-    /// Moves a device before another row and keeps that order across refreshes
-    /// and relaunches. Shortcut slots resolve against this same `devices` array.
-    func moveDevice(id: String, before targetID: String) {
-        let reordered = DeviceOrder.moving(devices, id: id, before: targetID)
-        guard reordered.map(\.id) != devices.map(\.id) else { return }
-        devices = reordered
-        preferredOrder = reordered.map(\.id)
-        UserDefaults.standard.set(preferredOrder, forKey: Self.deviceOrderKey)
-    }
-
-    func moveDevice(id: String, to destination: Int) {
-        let reordered = DeviceOrder.moving(devices, id: id, to: destination)
-        guard reordered.map(\.id) != devices.map(\.id) else { return }
-        devices = reordered
-        preferredOrder = reordered.map(\.id)
-        UserDefaults.standard.set(preferredOrder, forKey: Self.deviceOrderKey)
-    }
-
-    func moveDevices(from source: IndexSet, to destination: Int) {
-        let reordered = DeviceOrder.moving(devices, from: source, to: destination)
-        guard reordered.map(\.id) != devices.map(\.id) else { return }
-        devices = reordered
-        preferredOrder = reordered.map(\.id)
-        UserDefaults.standard.set(preferredOrder, forKey: Self.deviceOrderKey)
     }
 
     /// Entry point for global shortcuts: capture the Nth device in the list,
@@ -214,7 +256,7 @@ final class DeviceStore: ObservableObject {
     func captureDevice(at index: Int, thenPaste: Bool = false) async {
         await refresh()
         guard devices.indices.contains(index), devices[index].available else {
-            NSSound(named: "Basso")?.play()
+            signalError()
             return
         }
         _ = await capture(devices[index], thenPaste: thenPaste)
@@ -226,7 +268,7 @@ final class DeviceStore: ObservableObject {
     private func simulatePaste() -> Bool {
         let promptKey = "AXTrustedCheckOptionPrompt" as CFString
         guard AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) else {
-            NSSound(named: "Basso")?.play()
+            signalError()
             return false
         }
         let source = CGEventSource(stateID: .combinedSessionState)
@@ -265,11 +307,11 @@ final class DeviceStore: ObservableObject {
                 }
             } catch {
                 status[device.id] = (error.localizedDescription, true)
-                NSSound(named: "Basso")?.play()
+                signalError()
             }
         case .failure(let error):
             status[device.id] = (error.message, true)
-            NSSound(named: "Basso")?.play()
+            signalError()
         }
 
         let shownAt = Date()
@@ -281,6 +323,11 @@ final class DeviceStore: ObservableObject {
             }
         }
         return succeeded
+    }
+
+    private func signalError() {
+        errorFeedbackSequence &+= 1
+        NSSound(named: "Tink")?.play()
     }
 
     /// Applies the capture preferences: clipboard mode, optional save to folder.
@@ -346,7 +393,6 @@ final class DeviceStore: ObservableObject {
 struct DeviceListView: View {
     @ObservedObject var store: DeviceStore
     private let refreshTimer = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
-    @State private var draggedDeviceID: String?
 
     private var listHeight: CGFloat {
         let setupRows = (store.devices.contains(where: { $0.kind == .ios }) ? 0 : 1)
@@ -406,23 +452,13 @@ struct DeviceListView: View {
                     DeviceRow(
                         device: device,
                         index: store.devices.firstIndex(of: device) ?? 0,
-                        store: store,
-                        onDragStart: { draggedDeviceID = device.id }
+                        store: store
                     )
                     .listRowSeparator(.visible)
                     .listRowSeparatorTint(.gray)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
-                    .onDrop(
-                        of: [UTType.plainText],
-                        delegate: DeviceReorderDropDelegate(
-                            target: device,
-                            store: store,
-                            draggedDeviceID: $draggedDeviceID
-                        )
-                    )
                 }
-                .onMove(perform: store.moveDevices)
 
                 if !store.devices.contains(where: { $0.kind == .ios }) {
                     PlaceholderSetupRow(config: .ios)
@@ -470,35 +506,6 @@ struct DeviceListView: View {
                 NSApp.activate(ignoringOtherApps: true)
             }
         }
-    }
-}
-
-private struct DeviceReorderDropDelegate: DropDelegate {
-    let target: Device
-    @ObservedObject var store: DeviceStore
-    @Binding var draggedDeviceID: String?
-
-    func dropEntered(info: DropInfo) {
-        guard let draggedDeviceID,
-              draggedDeviceID != target.id,
-              let sourceIndex = store.devices.firstIndex(where: { $0.id == draggedDeviceID }),
-              let targetIndex = store.devices.firstIndex(where: { $0.id == target.id })
-        else { return }
-
-        if sourceIndex < targetIndex {
-            store.moveDevice(id: draggedDeviceID, to: targetIndex + 1)
-        } else {
-            store.moveDevice(id: draggedDeviceID, before: target.id)
-        }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        draggedDeviceID = nil
-        return true
     }
 }
 
@@ -662,7 +669,6 @@ struct DeviceRow: View {
     let device: Device
     let index: Int
     @ObservedObject var store: DeviceStore
-    let onDragStart: () -> Void
     @ObservedObject private var shortcuts = ShortcutStore.shared
 
     private var assignedShortcut: Shortcut? {
@@ -671,34 +677,15 @@ struct DeviceRow: View {
 
 
     @State private var isRowHovering = false
-    @State private var isIconHovering = false
-
-    private var showsGrabber: Bool {
-        isIconHovering || (index == 0 && ProcessInfo.processInfo.environment["DEVICESHOTS_VISUAL_HOVER_FIRST_DEVICE"] == "1")
-    }
-
     var body: some View {
         Button {
             Task { await store.capture(device) }
         } label: {
             HStack(spacing: 10) {
-                Group {
-                    if showsGrabber {
-                        GrabberIcon()
-                            .foregroundStyle(device.available ? .secondary : .tertiary)
-                            .help("Drag to reorder devices and shortcut positions")
-                    } else {
-                        Image(systemName: device.icon)
-                            .foregroundStyle(device.available ? .primary : .tertiary)
-                    }
-                }
+                Image(systemName: device.icon)
+                    .foregroundStyle(device.available ? .primary : .tertiary)
                 .font(.title3)
                 .frame(width: 24, height: 24)
-                .onHover { isIconHovering = $0 }
-                .onDrag {
-                    onDragStart()
-                    return NSItemProvider(object: device.id as NSString)
-                }
 
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -746,20 +733,5 @@ struct DeviceRow: View {
         .animation(.easeInOut(duration: 0.12), value: isRowHovering)
         .onHover { isRowHovering = $0 }
         .help(device.available ? "Hover to copy screenshot" : "Device not connected")
-    }
-}
-
-/// A six-dot drag affordance, matching macOS list reordering conventions.
-private struct GrabberIcon: View {
-    var body: some View {
-        VStack(spacing: 2) {
-            ForEach(0..<3, id: \.self) { _ in
-                HStack(spacing: 2) {
-                    Circle().frame(width: 3, height: 3)
-                    Circle().frame(width: 3, height: 3)
-                }
-            }
-        }
-        .frame(width: 24, height: 24)
     }
 }

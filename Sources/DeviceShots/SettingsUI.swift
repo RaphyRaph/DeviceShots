@@ -39,22 +39,42 @@ struct SettingsView: View {
         }
     }
 
-    @State private var selection: Section? = .capture
+    @State private var selection: Section = .capture
 
     var body: some View {
-        NavigationSplitView {
-            List(Section.allCases, selection: $selection) { section in
-                Label(section.rawValue, systemImage: section.icon)
-                    .tag(section)
-            }
-            .navigationSplitViewColumnWidth(min: 150, ideal: 160, max: 180)
-        } detail: {
-            switch selection ?? .capture {
-            case .capture: CaptureSettingsView()
-            case .shortcuts: ShortcutsSettingsView()
+        Group {
+            if #available(macOS 27.0, *) {
+                modernSettingsTabs
+            } else {
+                legacySettingsTabs
             }
         }
         .frame(width: 640, height: 440)
+    }
+
+    /// The TabContent-based API gives macOS 27 control of the native settings
+    /// title bar. Keep the legacy tab-item construction for macOS 26 and older.
+    @available(macOS 27.0, *)
+    private var modernSettingsTabs: some View {
+        TabView(selection: $selection) {
+            Tab(Section.capture.rawValue, systemImage: Section.capture.icon, value: Section.capture) {
+                CaptureSettingsView()
+            }
+            Tab(Section.shortcuts.rawValue, systemImage: Section.shortcuts.icon, value: Section.shortcuts) {
+                ShortcutsSettingsView()
+            }
+        }
+    }
+
+    private var legacySettingsTabs: some View {
+        TabView(selection: $selection) {
+            CaptureSettingsView()
+                .tag(Section.capture)
+                .tabItem { Label(Section.capture.rawValue, systemImage: Section.capture.icon) }
+            ShortcutsSettingsView()
+                .tag(Section.shortcuts)
+                .tabItem { Label(Section.shortcuts.rawValue, systemImage: Section.shortcuts.icon) }
+        }
     }
 }
 
@@ -68,7 +88,7 @@ struct CaptureSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Copy to clipboard:", selection: $clipboardMode) {
+                Picker("Copy to clipboard", selection: $clipboardMode) {
                     ForEach(ClipboardMode.allCases) { mode in
                         Text(mode.label).tag(mode.rawValue)
                     }
@@ -81,20 +101,20 @@ struct CaptureSettingsView: View {
 
             Section {
                 Toggle("Save a copy to folder", isOn: $saveToFolder)
-                LabeledContent("Destination:") {
-                    HStack {
-                        Text(abbreviatedPath)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(saveToFolder ? .primary : .tertiary)
-                        Button("Choose…", action: chooseFolder)
-                            .disabled(!saveToFolder)
+                if saveToFolder {
+                    LabeledContent("Destination") {
+                        HStack {
+                            Text(abbreviatedPath)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Button("Choose…", action: chooseFolder)
+                        }
                     }
+                    Toggle("Include device name in filename", isOn: $filenameIncludesDevice)
+                    Text(filenameExample)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                Toggle("Include device name in filename", isOn: $filenameIncludesDevice)
-                Text(filenameExample)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -105,7 +125,6 @@ struct CaptureSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Capture")
     }
 
     private var abbreviatedPath: String {
@@ -166,7 +185,6 @@ struct ShortcutsSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Shortcuts")
         .task { await devices.refresh() }
     }
 
@@ -174,6 +192,6 @@ struct ShortcutsSettingsView: View {
         let name = devices.devices.indices.contains(index)
             ? devices.devices[index].name
             : "Connected device"
-        return "\(index + 1). \(name):"
+        return "\(index + 1). \(name)"
     }
 }

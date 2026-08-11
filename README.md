@@ -18,9 +18,11 @@ Requirements:
 
 ## Usage
 
-Click the camera-viewfinder icon in the menu bar. Every detected device is
-listed; click the camera button next to one to copy its current screen to the
-clipboard as PNG. A "Pop" sound and a green checkmark confirm the copy.
+Click the camera-viewfinder icon in the menu bar. A native macOS menu lists
+every detected device; select one to copy its current screen to the clipboard
+as PNG. A "Pop" sound confirms the copy, and the next menu opening shows the
+result beside that device. The menu also includes refresh, setup guidance,
+Settings, and Quit.
 
 Detected devices:
 
@@ -29,13 +31,14 @@ Detected devices:
   (uses `xcrun devicectl`; requires Developer Mode enabled on the device)
 - **iOS simulators** — any booted simulator (uses `xcrun simctl`)
 
-The device list refreshes automatically every few seconds while the panel is
-open. Multiple devices can be listed and captured independently — but note the
-clipboard only holds one image at a time.
+The device menu refreshes each time it opens and can also be refreshed manually.
+Multiple devices can be listed and captured independently — but note the
+clipboard only holds one image at a time. Devices use their discovery order;
+manual reordering is not available.
 
 ## Settings
 
-Open via the gear icon in the panel footer. Two sections:
+Open via **Settings…** in the menu. Two sections:
 
 - **Capture** — what a capture produces:
   - *Copy to clipboard*: Image only, File only, or Image and file (file mode
@@ -44,8 +47,8 @@ Open via the gear icon in the panel footer. Two sections:
   - *Include device name in filename* (e.g. `iPhone 15 Pro 2026-07-08 at 14.30.52.png`)
   - *Play sound after capture*
 - **Shortcuts** — global hotkeys for **Capture Device 1…6**. Each shortcut
-  captures the device at that position in the menu list (top to bottom); the
-  assigned shortcut is shown next to the device row. Click "Record shortcut"
+  captures the device at that discovery position in the menu (top to bottom);
+  the assigned shortcut is shown next to the device. Click "Record shortcut"
   and type a combination; Esc cancels, Delete clears. Hotkeys work
   system-wide without opening the panel (Carbon `RegisterEventHotKey`, no
   accessibility permission needed).
