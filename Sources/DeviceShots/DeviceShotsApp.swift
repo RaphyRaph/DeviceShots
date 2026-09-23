@@ -102,15 +102,15 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     private func rebuildMenu() {
         menu.removeAllItems()
 
-        let header = NSMenuItem(title: store.isRefreshing ? "Refreshing devices…" : "Connected Devices", action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-
         if store.devices.isEmpty {
-            let empty = NSMenuItem(title: store.hasLoadedOnce ? "No devices detected" : "Looking for devices…", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            menu.addItem(empty)
+            let scanning = NSMenuItem(title: "Scanning for devices…", action: nil, keyEquivalent: "")
+            scanning.isEnabled = false
+            menu.addItem(scanning)
         } else {
+            let header = NSMenuItem(title: store.isRefreshing ? "Refreshing devices…" : "Connected Devices", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+
             // Disconnected slotted devices aren't in store.devices, so they're
             // naturally left out; connected ones appear in slot order.
             for (device, slot) in SlotStore.shared.state.ordered(store.devices) {
@@ -194,20 +194,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showSetup(_ sender: NSMenuItem) {
-        guard let config = sender.representedObject as? SetupConfig else { return }
-        let alert = NSAlert()
-        alert.messageText = "Set up \(config.title)"
-        var stepNumber = 0
-        let instructions = config.sections.map { section in
-            let steps = section.steps.map { step -> String in
-                stepNumber += 1
-                return "\(stepNumber). \(step)"
-            }
-            return ([section.header] + steps).joined(separator: "\n")
-        }
-        alert.informativeText = (instructions + [config.warning ?? config.footnote]).joined(separator: "\n\n")
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        (sender.representedObject as? SetupConfig)?.showAlert()
     }
 
     func tearDown() {
@@ -561,53 +548,4 @@ private func screenshotFilenameBase(_ deviceName: String, includeDevice: Bool) -
         .joined(separator: "-")
         .trimmingCharacters(in: .whitespacesAndNewlines)
     return cleaned.isEmpty ? "Screenshot" : cleaned
-}
-
-struct SetupConfig {
-    let icon: String
-    let title: String
-    /// Sections of (header, steps); steps are numbered continuously across sections.
-    let sections: [(header: String, steps: [String])]
-    let footnote: String
-    let warning: String?    // shown instead of footnote when non-nil
-
-    static let android = SetupConfig(
-        icon: "apps.iphone",
-        title: "Android device",
-        sections: [
-            ("On the Android device", [
-                "Settings → About phone → tap **Build number** 7 times to enable Developer options.",
-                "Settings → System → **Developer options** → turn on **USB debugging**.",
-                "Connect the device to this Mac with a USB data cable.",
-                "Tap **Allow** on the “Allow USB debugging?” prompt (check “Always allow from this computer”).",
-            ]),
-            ("On this Mac", [
-                "If macOS asks “Allow accessory to connect?”, click **Allow**.",
-            ]),
-        ],
-        footnote: "The device will appear here automatically once connected. If it shows as “unauthorized”, the allow prompt is still waiting on the phone’s screen.",
-        warning: adbPath == nil
-            ? "adb was not found on this Mac. Install it with `brew install android-platform-tools`, then relaunch Device Shots."
-            : nil
-    )
-
-    static let ios = SetupConfig(
-        icon: "apps.iphone",
-        title: "iPhone / iPad",
-        sections: [
-            ("On the iPhone or iPad", [
-                "Connect the device to this Mac with a USB cable.",
-                "Unlock it and tap **Trust** when asked to trust this computer.",
-                "Enable Settings → Privacy & Security → **Developer Mode** (the device restarts, required for screenshots).",
-            ]),
-            ("On this Mac", [
-                "If macOS asks “Allow accessory to connect?”, click **Allow**.",
-                "First-time pairing can take a minute while the device prepares for development.",
-            ]),
-        ],
-        footnote: "The device will appear here automatically once connected. After the first pairing, capture also works over Wi‑Fi when the device is on the same network.",
-        warning: hasXcodeTools
-            ? nil
-            : "Xcode is required to capture from iPhones, iPads, and simulators. Install it from the App Store, open it once to finish setup, then relaunch Device Shots."
-    )
 }
