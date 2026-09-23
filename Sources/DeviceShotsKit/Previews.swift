@@ -5,12 +5,21 @@ import AppKit
 /// Sample states shared by Xcode previews and the snapshot tests
 /// (`./snapshots.sh`), so both show exactly the same scenarios.
 enum Fixtures {
-    static let iphone = SlottedDevice(Device(id: "IPHONE", name: "iPhone 15 Pro RG", detail: "",
-                                             kind: .ios, available: true))
-    static let pixel = SlottedDevice(Device(id: "57131FDCH0016C", name: "Pixel 10 Pro", detail: "",
-                                            kind: .android, available: true, hardwareSerial: "57131FDCH0016C"))
+    static let iphoneDevice = Device(id: "IPHONE", name: "QA iPhone", detail: "iPhone 17 Pro · iOS 27.0",
+                                     kind: .ios, available: true)
+    static let pixelDevice = Device(id: "57131FDCH0016C", name: "Pixel 10 Pro", detail: "Android 17",
+                                    kind: .android, available: true, hardwareSerial: "57131FDCH0016C")
+    static let simulatorDevice = Device(id: "SIM", name: "iPhone 17 Simulator", detail: "iOS 27.0",
+                                        kind: .simulator, available: true)
+
+    static let iphone = SlottedDevice(iphoneDevice)
+    static let pixel = SlottedDevice(pixelDevice)
     static let ipad = SlottedDevice(Device(id: "IPAD", name: "iPad Pro", detail: "",
                                            kind: .ios, available: true, isTablet: true))
+
+    /// What discovery "finds" in demo mode: the iPad is disconnected, and the
+    /// simulator isn't in a slot.
+    static let devices = [iphoneDevice, pixelDevice, simulatorDevice]
 
     static let optCmd1 = Shortcut(keyCode: 18, modifiers: NSEvent.ModifierFlags([.option, .command]).rawValue)
     static let optCmd2 = Shortcut(keyCode: 19, modifiers: NSEvent.ModifierFlags([.option, .command]).rawValue)

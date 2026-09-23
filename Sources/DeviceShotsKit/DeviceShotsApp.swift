@@ -116,7 +116,13 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             // Disconnected slotted devices aren't in store.devices, so they're
             // naturally left out; connected ones appear in slot order.
             for (device, slot) in SlotStore.shared.state.ordered(store.devices) {
-                let item = NSMenuItem(title: deviceTitle(device, slot: slot), action: #selector(capture(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: device.name, action: #selector(capture(_:)), keyEquivalent: "")
+                // Show the slot's capture shortcut as a native key equivalent
+                // (right-aligned like ⌘, and ⌘Q).
+                if let shortcut = slot.flatMap({ SlotStore.shared.state.shortcut(.capture, slot: $0) }) {
+                    item.keyEquivalent = shortcut.menuKeyEquivalent
+                    item.keyEquivalentModifierMask = shortcut.modifierFlags
+                }
                 item.target = self
                 item.representedObject = device
                 item.isEnabled = device.available && !store.capturing.contains(device.id)
@@ -138,12 +144,6 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         let quit = NSMenuItem(title: "Quit Device Shots", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
-    }
-
-    private func deviceTitle(_ device: Device, slot: Int?) -> String {
-        let shortcut = slot.flatMap { SlotStore.shared.state.shortcut(.capture, slot: $0)?.display }
-        let shortcutSuffix = shortcut.map { "\t\($0)" } ?? ""
-        return "\(device.name)\(shortcutSuffix)"
     }
 
     private func deviceSubtitle(_ device: Device) -> String {
@@ -199,6 +199,14 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         if let config = sender.representedObject as? SetupConfig { SetupWindow.show(config) }
     }
 
+    #if DEBUG
+    /// Opens the menu programmatically (DEVICESHOTS_OPEN_MENU, for screenshots).
+    func openMenu() {
+        menu.appearance = DebugHooks.appearance
+        statusItem.button?.performClick(nil)
+    }
+    #endif
+
     func tearDown() {
         storeObserver = nil
         captureObserver = nil
@@ -225,10 +233,7 @@ public final class AppLifecycle: NSObject, NSApplicationDelegate {
         Task { await DeviceStore.shared.refresh() }
         CaptureLatencyBench.runIfRequested()
         #if DEBUG
-        // Open a setup guide at launch (ios|android) to test the window in the real app.
-        if let guide = ProcessInfo.processInfo.environment["DEVICESHOTS_SHOW_SETUP"] {
-            SetupWindow.show(guide == "ios" ? .ios : .android)
-        }
+        DebugHooks.applyAtLaunch { [weak self] in self?.statusItemController?.openMenu() }
         #endif
     }
 
@@ -271,6 +276,13 @@ final class DeviceStore: ObservableObject {
     var isCapturingAnyDevice: Bool { !capturing.isEmpty }
 
     func refresh() async {
+        #if DEBUG
+        if DebugHooks.isDemo {
+            devices = Fixtures.devices
+            hasLoadedOnce = true
+            return
+        }
+        #endif
         guard !isRefreshing else {
             discoveryLog.notice("refresh skipped: one already in flight")
             return

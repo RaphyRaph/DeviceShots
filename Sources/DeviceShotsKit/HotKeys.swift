@@ -45,6 +45,9 @@ struct Shortcut: Codable, Equatable {
         return result + KeyDisplay.baseKeyName(keyCode)
     }
 
+    /// The key as an NSMenuItem key equivalent, so menus align it natively.
+    var menuKeyEquivalent: String { KeyDisplay.menuKeyEquivalent(keyCode) }
+
     var carbonModifiers: UInt32 {
         var carbon: UInt32 = 0
         if modifierFlags.contains(.command) { carbon |= UInt32(cmdKey) }
@@ -141,6 +144,29 @@ enum KeyDisplay {
     ]
 
     static let functionKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106]
+
+    /// Keys whose menu key equivalent isn't their printed character.
+    private static let menuKeyScalars: [UInt16: Int] = {
+        var scalars: [UInt16: Int] = [
+            36: 0x0D, 48: 0x09, 49: 0x20, 117: NSDeleteFunctionKey,
+            123: NSLeftArrowFunctionKey, 124: NSRightArrowFunctionKey,
+            125: NSDownArrowFunctionKey, 126: NSUpArrowFunctionKey,
+            115: NSHomeFunctionKey, 119: NSEndFunctionKey,
+            116: NSPageUpFunctionKey, 121: NSPageDownFunctionKey,
+        ]
+        let fKeysInOrder: [UInt16] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106]
+        for (offset, keyCode) in fKeysInOrder.enumerated() {
+            scalars[keyCode] = NSF1FunctionKey + offset
+        }
+        return scalars
+    }()
+
+    static func menuKeyEquivalent(_ keyCode: UInt16) -> String {
+        if let scalar = menuKeyScalars[keyCode].flatMap(UnicodeScalar.init) {
+            return String(Character(scalar))
+        }
+        return baseKeyName(keyCode).lowercased()
+    }
 
     /// The key's unshifted name in the current keyboard layout ("1", "A", ";" …).
     static func baseKeyName(_ keyCode: UInt16) -> String {

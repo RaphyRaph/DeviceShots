@@ -2,6 +2,15 @@ import XCTest
 @testable import DeviceShotsKit
 
 final class DeviceDiscoveryTests: XCTestCase {
+    func testShortcutMenuKeyEquivalents() {
+        func key(_ code: UInt16) -> String { Shortcut(keyCode: code, modifiers: 0).menuKeyEquivalent }
+        XCTAssertEqual(key(20), "3")                                       // digit
+        XCTAssertEqual(key(0), "a")                                        // letter, lowercased
+        XCTAssertEqual(key(122), String(Character(UnicodeScalar(NSF1FunctionKey)!)))       // F1
+        XCTAssertEqual(key(126), String(Character(UnicodeScalar(NSUpArrowFunctionKey)!)))  // ↑
+        XCTAssertEqual(key(49), " ")                                       // space
+    }
+
     func testShortcutNormalizesKeypadDigitsAndSideSpecificModifierBits() {
         let deviceSpecificBit: UInt = 1 << 8
         let shortcut = Shortcut(

@@ -57,7 +57,14 @@ struct SettingsView: View {
         }
     }
 
-    @State private var selection: Section = .capture
+    @State private var selection: Section = Self.initialSection
+
+    private static var initialSection: Section {
+        #if DEBUG
+        if let tab = DebugHooks.settingsTab { return tab }
+        #endif
+        return .capture
+    }
 
     var body: some View {
         TabView(selection: $selection) {

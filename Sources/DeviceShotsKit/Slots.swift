@@ -154,6 +154,13 @@ final class SlotStore: ObservableObject {
     }
 
     private init() {
+        #if DEBUG
+        if DebugHooks.isDemo {
+            // Sample slots; save() and registerHotKeys() are no-ops in demo mode.
+            state = SlotState(slots: Fixtures.slots)
+            return
+        }
+        #endif
         let defaults = UserDefaults.standard
         if let data = defaults.data(forKey: Self.defaultsKey),
            let decoded = try? JSONDecoder().decode(SlotState.self, from: data) {
@@ -167,6 +174,9 @@ final class SlotStore: ObservableObject {
     }
 
     private func save() {
+        #if DEBUG
+        if DebugHooks.isDemo { return }
+        #endif
         if let data = try? JSONEncoder().encode(state) {
             UserDefaults.standard.set(data, forKey: Self.defaultsKey)
         }
@@ -217,6 +227,9 @@ final class SlotStore: ObservableObject {
     }
 
     private func registerHotKeys() {
+        #if DEBUG
+        if DebugHooks.isDemo { return }
+        #endif
         HotKeyCenter.shared.unregisterAll()
         for (index, slot) in state.slots.enumerated() {
             if let capture = slot.capture {
