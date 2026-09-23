@@ -4,6 +4,12 @@ import PackageDescription
 let package = Package(
     name: "DeviceShots",
     platforms: [.macOS("27.0")],
+    products: [
+        // Declared so Xcode generates a DeviceShotsKit scheme: select it to
+        // use SwiftUI previews.
+        .library(name: "DeviceShotsKit", targets: ["DeviceShotsKit"]),
+        .executable(name: "DeviceShots", targets: ["DeviceShots"]),
+    ],
     targets: [
         // All app code lives in the library so Xcode can preview its SwiftUI
         // views; the executable is only the @main entry point.
