@@ -93,13 +93,17 @@ enum SetupWindow {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let host = NSHostingController(rootView: SetupWindowContent(config: config) {
+        let host = NSHostingView(rootView: SetupWindowContent(config: config) {
             windows[config.title]?.close()
         })
-        host.sizingOptions = .preferredContentSize
-        let window = NSWindow(contentViewController: host)
+        // Size the window once from the content and don't let SwiftUI drive it
+        // afterwards: resizing a titled window changes the content's safe area,
+        // which re-requests a size — a loop AppKit aborts the app over.
+        host.sizingOptions = []
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: host.fittingSize),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.contentView = host
         window.title = "Set up your \(config.title)"
-        window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)

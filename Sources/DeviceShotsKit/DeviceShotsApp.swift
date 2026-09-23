@@ -224,6 +224,12 @@ public final class AppLifecycle: NSObject, NSApplicationDelegate {
         // Discover at launch so the menu and hotkeys don't start empty.
         Task { await DeviceStore.shared.refresh() }
         CaptureLatencyBench.runIfRequested()
+        #if DEBUG
+        // Open a setup guide at launch (ios|android) to test the window in the real app.
+        if let guide = ProcessInfo.processInfo.environment["DEVICESHOTS_SHOW_SETUP"] {
+            SetupWindow.show(guide == "ios" ? .ios : .android)
+        }
+        #endif
     }
 
     /// Menu-bar app: hiding the settings bridge or closing Settings must not quit.
