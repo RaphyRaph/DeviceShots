@@ -33,9 +33,9 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
         menu.delegate = self
 
-        storeObserver = Publishers.CombineLatest3(store.$devices, store.$status, store.$capturing)
+        storeObserver = Publishers.CombineLatest4(store.$devices, store.$status, store.$capturing, SlotStore.shared.$state)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _, _ in
+            .sink { [weak self] _, _, _, _ in
                 self?.rebuildMenu()
             }
         captureObserver = store.$capturing
@@ -71,18 +71,15 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
-            for (index, device) in store.devices.enumerated() {
-                let item = NSMenuItem(title: deviceTitle(device, index: index), action: #selector(capture(_:)), keyEquivalent: "")
+            // Disconnected slotted devices aren't in store.devices, so they're
+            // naturally left out; connected ones appear in slot order.
+            for (device, slot) in SlotStore.shared.state.ordered(store.devices) {
+                let item = NSMenuItem(title: deviceTitle(device, slot: slot), action: #selector(capture(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = device
                 item.isEnabled = device.available && !store.capturing.contains(device.id)
                 item.image = NSImage(systemSymbolName: device.icon, accessibilityDescription: device.name)
-                let subtitle = deviceSubtitle(device)
-                if #available(macOS 14.4, *) {
-                    item.subtitle = subtitle
-                } else {
-                    item.title += " — \(subtitle)"
-                }
+                item.subtitle = deviceSubtitle(device)
                 item.toolTip = device.available ? "Capture" : "Device not connected"
                 menu.addItem(item)
             }
@@ -101,10 +98,8 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    private func deviceTitle(_ device: Device, index: Int) -> String {
-        let shortcut = ShortcutStore.shared.captureShortcuts.indices.contains(index)
-            ? ShortcutStore.shared.captureShortcuts[index]?.display
-            : nil
+    private func deviceTitle(_ device: Device, slot: Int?) -> String {
+        let shortcut = slot.flatMap { ShortcutStore.shared.captureShortcuts[$0]?.display }
         let shortcutSuffix = shortcut.map { "\t\($0)" } ?? ""
         return "\(device.name)\(shortcutSuffix)"
     }
@@ -235,23 +230,39 @@ final class DeviceStore: ObservableObject {
         guard !isRefreshing else { return }
         isRefreshing = true
         let found = await DeviceDiscovery.allDevices()
+        // Update slots before publishing devices so the menu rebuild sees both.
+        SlotStore.shared.reconcile(with: found)
         devices = found
         hasLoadedOnce = true
         isRefreshing = false
     }
 
-    /// Entry point for global shortcuts: capture the Nth device in the list,
-    /// optionally pasting into the frontmost app afterwards.
-    /// Uses the cached device list so hotkeys don't wait on rediscovery; loads once if needed.
-    func captureDevice(at index: Int, thenPaste: Bool = false) async {
+    func connectedDevice(persistentID: String) -> Device? {
+        devices.first { $0.persistentID == persistentID && $0.available }
+    }
+
+    /// Entry point for global shortcuts: capture the device remembered in a
+    /// slot, optionally pasting into the frontmost app afterwards.
+    /// Uses the cached device list so hotkeys don't wait on rediscovery.
+    func captureSlot(_ slot: Int, thenPaste: Bool = false) async {
         if LatencyOpts.forceHotkeyRefresh || !hasLoadedOnce {
             await refresh()
         }
-        guard devices.indices.contains(index), devices[index].available else {
+        guard let id = SlotStore.shared.state.slots[slot]?.persistentID else {
             signalError()
             return
         }
-        _ = await capture(devices[index], thenPaste: thenPaste)
+        var device = connectedDevice(persistentID: id)
+        if device == nil {
+            // The cached list may predate a reconnect; check once before failing.
+            await refresh()
+            device = connectedDevice(persistentID: id)
+        }
+        guard let device else {
+            signalError()
+            return
+        }
+        _ = await capture(device, thenPaste: thenPaste)
     }
 
     /// Sends ⌘V to the frontmost app. Returns false when Accessibility access
@@ -499,137 +510,6 @@ private func screenshotFilenameBase(_ deviceName: String, includeDevice: Bool) -
     return cleaned.isEmpty ? "Screenshot" : cleaned
 }
 
-struct DeviceListView: View {
-    @ObservedObject var store: DeviceStore
-    private let refreshTimer = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
-
-    private var listHeight: CGFloat {
-        let setupRows = (store.devices.contains(where: { $0.kind == .ios }) ? 0 : 1)
-            + (store.devices.contains(where: { $0.kind == .android }) ? 0 : 1)
-        let rowCount = max(store.devices.count + setupRows, 1)
-        return min(CGFloat(rowCount) * 44, 320)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-            content
-            Divider()
-            footer
-        }
-        .frame(width: 320)
-        .onAppear { Task { await store.refresh() } }
-        .onReceive(refreshTimer) { _ in Task { await store.refresh() } }
-    }
-
-    private var header: some View {
-        HStack {
-            Text("Connected devices")
-                .font(.headline)
-            Spacer()
-            if store.isRefreshing {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 20, height: 20)
-            } else {
-                Button {
-                    Task { await store.refresh() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .frame(width: 20, height: 20)
-                .help("Refresh device list")
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if store.devices.isEmpty && !store.hasLoadedOnce {
-            Text("Looking for devices…")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 24)
-        } else {
-            List {
-                ForEach(store.devices) { device in
-                    DeviceRow(
-                        device: device,
-                        index: store.devices.firstIndex(of: device) ?? 0,
-                        store: store
-                    )
-                    .listRowSeparator(.visible)
-                    .listRowSeparatorTint(.gray)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-                }
-
-                if !store.devices.contains(where: { $0.kind == .ios }) {
-                    PlaceholderSetupRow(config: .ios)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                }
-                if !store.devices.contains(where: { $0.kind == .android }) {
-                    PlaceholderSetupRow(config: .android)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .deviceListContentMarginsRemoved()
-            .padding(.horizontal, -8)
-            .frame(height: listHeight)
-        }
-    }
-
-    private var footer: some View {
-        HStack {
-            settingsButton
-            Spacer()
-            Button("Quit") { NSApp.terminate(nil) }
-        }
-        .buttonStyle(.borderless)
-        .controlSize(.small)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
-    @ViewBuilder
-    private var settingsButton: some View {
-        if #available(macOS 14.0, *) {
-            SettingsLink {
-                Text("Settings")
-            }
-            .simultaneousGesture(TapGesture().onEnded {
-                NSApp.activate(ignoringOtherApps: true)
-            })
-        } else {
-            Button("Settings") {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                NSApp.activate(ignoringOtherApps: true)
-            }
-        }
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func deviceListContentMarginsRemoved() -> some View {
-        if #available(macOS 14.0, *) {
-            self
-                .contentMargins([.top, .horizontal], 0, for: .scrollContent)
-        } else {
-            self
-        }
-    }
-}
-
 struct SetupConfig {
     let icon: String
     let title: String
@@ -677,170 +557,4 @@ struct SetupConfig {
             ? nil
             : "Xcode is required to capture from iPhones, iPads, and simulators. Install it from the App Store, open it once to finish setup, then relaunch Device Shots."
     )
-}
-
-/// Shown when no device of a platform is detected; expands into setup instructions.
-struct PlaceholderSetupRow: View {
-    let config: SetupConfig
-    @State private var expanded = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: config.icon)
-                        .font(.title3)
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 24)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(config.title)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.secondary)
-                        Text("Not detected — how to connect")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-
-            if expanded {
-                VStack(alignment: .leading, spacing: 6) {
-                    let numberedSections = numbered(config.sections)
-                    ForEach(numberedSections.indices, id: \.self) { sectionIndex in
-                        let section = numberedSections[sectionIndex]
-                        instructionsHeader(section.header)
-                            .padding(.top, sectionIndex == 0 ? 0 : 4)
-                        ForEach(section.steps, id: \.number) { item in
-                            step(item.number, item.text)
-                        }
-                    }
-                    if let warning = config.warning {
-                        Text(.init("⚠️ " + warning))
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .padding(.top, 4)
-                    } else {
-                        Text(config.footnote)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 4)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-            }
-        }
-    }
-
-    private func numbered(_ sections: [(header: String, steps: [String])])
-        -> [(header: String, steps: [(number: Int, text: String)])] {
-        var counter = 0
-        return sections.map { section in
-            (section.header, section.steps.map { text in
-                counter += 1
-                return (counter, text)
-            })
-        }
-    }
-
-    private func instructionsHeader(_ text: String) -> some View {
-        Text(text)
-            .font(.caption)
-            .fontWeight(.semibold)
-            .foregroundStyle(.secondary)
-            .textCase(.uppercase)
-    }
-
-    private func step(_ number: Int, _ markdown: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text("\(number).")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 14, alignment: .trailing)
-            Text(.init(markdown))
-                .font(.caption)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
-struct DeviceRow: View {
-    let device: Device
-    let index: Int
-    @ObservedObject var store: DeviceStore
-    @ObservedObject private var shortcuts = ShortcutStore.shared
-
-    private var assignedShortcut: Shortcut? {
-        shortcuts.captureShortcuts.indices.contains(index) ? shortcuts.captureShortcuts[index] : nil
-    }
-
-
-    @State private var isRowHovering = false
-    var body: some View {
-        Button {
-            Task { await store.capture(device) }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: device.icon)
-                    .foregroundStyle(device.available ? .primary : .tertiary)
-                .font(.title3)
-                .frame(width: 24, height: 24)
-
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 1) {
-                    Text(device.name)
-                        .fontWeight(.medium)
-                        .foregroundStyle(device.available ? .primary : .secondary)
-                    if let status = store.status[device.id] {
-                        Text(status.message)
-                            .font(.caption)
-                            .lineLimit(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .foregroundStyle(status.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                    } else {
-                        Text(device.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer()
-
-                if let assignedShortcut {
-                    Text(assignedShortcut.display)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.tertiary)
-                }
-
-                    if store.capturing.contains(device.id) {
-                        ProgressView().controlSize(.small)
-                    } else if isRowHovering && device.available {
-                        Image(systemName: "clipboard")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!device.available || store.capturing.contains(device.id))
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(Color.black.opacity(isRowHovering ? 0.10 : 0))
-        .animation(.easeInOut(duration: 0.12), value: isRowHovering)
-        .onHover { isRowHovering = $0 }
-        .help(device.available ? "Hover to copy screenshot" : "Device not connected")
-    }
 }

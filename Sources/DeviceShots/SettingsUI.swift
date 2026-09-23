@@ -60,20 +60,6 @@ struct SettingsView: View {
     @State private var selection: Section = .capture
 
     var body: some View {
-        Group {
-            if #available(macOS 27.0, *) {
-                modernSettingsTabs
-            } else {
-                legacySettingsTabs
-            }
-        }
-        .frame(width: 640, height: 440)
-    }
-
-    /// The TabContent-based API gives macOS 27 control of the native settings
-    /// title bar. Keep the legacy tab-item construction for macOS 26 and older.
-    @available(macOS 27.0, *)
-    private var modernSettingsTabs: some View {
         TabView(selection: $selection) {
             Tab(Section.capture.rawValue, systemImage: Section.capture.icon, value: Section.capture) {
                 CaptureSettingsView()
@@ -82,17 +68,7 @@ struct SettingsView: View {
                 ShortcutsSettingsView()
             }
         }
-    }
-
-    private var legacySettingsTabs: some View {
-        TabView(selection: $selection) {
-            CaptureSettingsView()
-                .tag(Section.capture)
-                .tabItem { Label(Section.capture.rawValue, systemImage: Section.capture.icon) }
-            ShortcutsSettingsView()
-                .tag(Section.shortcuts)
-                .tabItem { Label(Section.shortcuts.rawValue, systemImage: Section.shortcuts.icon) }
-        }
+        .frame(width: 640, height: 480)
     }
 }
 
@@ -180,7 +156,8 @@ struct CaptureSettingsView: View {
 }
 
 struct ShortcutsSettingsView: View {
-    @ObservedObject private var store = ShortcutStore.shared
+    @ObservedObject private var shortcuts = ShortcutStore.shared
+    @ObservedObject private var slots = SlotStore.shared
     @ObservedObject private var devices = DeviceStore.shared
 
     private let columnWidth: CGFloat = 120
@@ -188,40 +165,188 @@ struct ShortcutsSettingsView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent(" ") {
-                    HStack(spacing: 8) {
-                        Text("Capture")
-                            .frame(width: columnWidth)
-                        Text("Capture & Paste")
-                            .frame(width: columnWidth)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text("Device")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Capture")
+                        .frame(width: columnWidth)
+                    Text("Capture & Paste")
+                        .frame(width: columnWidth)
                 }
-                ForEach(0..<ShortcutStore.slotCount, id: \.self) { index in
-                    LabeledContent(rowLabel(index)) {
-                        HStack(spacing: 8) {
-                            ShortcutRecorder(shortcut: $store.captureShortcuts[index])
-                                .frame(width: columnWidth)
-                            ShortcutRecorder(shortcut: $store.pasteShortcuts[index])
-                                .frame(width: columnWidth)
-                        }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                ForEach(0..<SlotState.count, id: \.self) { slot in
+                    let slotted = slots.state.slots[slot]
+                    HStack(spacing: 8) {
+                        SlotDeviceCell(
+                            slotted: slotted,
+                            isConnected: slotted.map { devices.connectedDevice(persistentID: $0.persistentID) != nil } ?? false,
+                            onClear: { slots.clear(slot: slot) },
+                            onDrop: { slots.drop(persistentID: $0, on: slot) }
+                        )
+                        ShortcutRecorder(shortcut: $shortcuts.captureShortcuts[slot])
+                            .frame(width: columnWidth)
+                        ShortcutRecorder(shortcut: $shortcuts.pasteShortcuts[slot])
+                            .frame(width: columnWidth)
                     }
                 }
             } footer: {
-                Text("Each shortcut targets the device at that position in the menu list, top to bottom. Capture copies the screenshot to the clipboard; Capture & Paste also pastes it into the frontmost app (requires the Accessibility permission, prompted on first use).")
+                Text("Shortcuts belong to the slot. A newly connected device takes the first empty slot and keeps it while disconnected. Drag a device onto another slot to move it, or click × to free its slot. Capture & Paste also pastes into the frontmost app (requires the Accessibility permission, prompted on first use).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Other connected devices") {
+                UnslottedDevicesView(
+                    devices: devices.devices.filter { $0.available && slots.state.slotIndex(of: $0.persistentID) == nil },
+                    onDrop: { slots.unslot(persistentID: $0) }
+                )
+            }
         }
         .formStyle(.grouped)
-        .task { await devices.refresh() }
+        .task {
+            // Poll while visible so connect/disconnect shows up live.
+            while !Task.isCancelled {
+                await devices.refresh()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+}
+
+/// One slot's device: draggable when occupied, and a drop target for moving
+/// or swapping devices between slots.
+private struct SlotDeviceCell: View {
+    let slotted: SlottedDevice?
+    let isConnected: Bool
+    let onClear: () -> Void
+    let onDrop: (String) -> Void
+
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        content
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isDropTargeted ? Color.accentColor.opacity(0.15) : .clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(isDropTargeted ? Color.accentColor : .clear, lineWidth: 1.5)
+            )
+            .contentShape(Rectangle())
+            .dropDestination(for: String.self) { items, _ in
+                if let id = items.first { onDrop(id) }
+            }
+            .onDropSessionUpdated { session in
+                switch session.phase {
+                case .entering, .active: isDropTargeted = true
+                default: isDropTargeted = false
+                }
+            }
     }
 
-    private func rowLabel(_ index: Int) -> String {
-        let name = devices.devices.indices.contains(index)
-            ? devices.devices[index].name
-            : "Connected device"
-        return "\(index + 1). \(name)"
+    @ViewBuilder
+    private var content: some View {
+        if let slotted {
+            HStack(spacing: 8) {
+                DeviceLabel(name: slotted.name, icon: slotted.icon,
+                            status: isConnected ? "Connected" : "Disconnected",
+                            isConnected: isConnected)
+                Spacer(minLength: 4)
+                Button(action: onClear) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Free this slot")
+                .accessibilityLabel("Remove \(slotted.name) from this slot")
+            }
+            .draggable(slotted.persistentID) {
+                DeviceLabel(name: slotted.name, icon: slotted.icon, status: nil, isConnected: true)
+                    .padding(6)
+            }
+        } else {
+            Text("Empty")
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+/// Connected devices not in a slot. Drag one onto a slot to assign it; drop a
+/// slotted device here to free its slot.
+private struct UnslottedDevicesView: View {
+    let devices: [Device]
+    let onDrop: (String) -> Void
+
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if devices.isEmpty {
+                Text("None. Drag a device here to free its slot.")
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(devices) { device in
+                    DeviceLabel(name: device.name, icon: device.icon,
+                                status: device.kind == .simulator ? "Simulator" : device.detail,
+                                isConnected: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .draggable(device.persistentID) {
+                            DeviceLabel(name: device.name, icon: device.icon, status: nil, isConnected: true)
+                                .padding(6)
+                        }
+                }
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isDropTargeted ? Color.accentColor.opacity(0.15) : .clear)
+        )
+        .contentShape(Rectangle())
+        .dropDestination(for: String.self) { items, _ in
+            items.forEach(onDrop)
+        }
+        .onDropSessionUpdated { session in
+            switch session.phase {
+            case .entering, .active: isDropTargeted = true
+            default: isDropTargeted = false
+            }
+        }
+    }
+}
+
+private struct DeviceLabel: View {
+    let name: String
+    let icon: String
+    let status: String?
+    let isConnected: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(isConnected ? .primary : .tertiary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name)
+                    .lineLimit(1)
+                    .foregroundStyle(isConnected ? .primary : .secondary)
+                if let status {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }

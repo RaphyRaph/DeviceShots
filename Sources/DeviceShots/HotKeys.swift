@@ -133,7 +133,7 @@ final class HotKeyCenter {
 @MainActor
 final class ShortcutStore: ObservableObject {
     static let shared = ShortcutStore()
-    static let slotCount = 6
+    static let slotCount = SlotState.count
     private static let captureKey = "deviceShortcuts"
     private static let pasteKey = "devicePasteShortcuts"
 
@@ -173,7 +173,7 @@ final class ShortcutStore: ObservableObject {
             guard let shortcut else { continue }
             HotKeyCenter.shared.register(shortcut) {
                 Task { @MainActor in
-                    await DeviceStore.shared.captureDevice(at: index)
+                    await DeviceStore.shared.captureSlot(index)
                 }
             }
         }
@@ -181,7 +181,7 @@ final class ShortcutStore: ObservableObject {
             guard let shortcut else { continue }
             HotKeyCenter.shared.register(shortcut) {
                 Task { @MainActor in
-                    await DeviceStore.shared.captureDevice(at: index, thenPaste: true)
+                    await DeviceStore.shared.captureSlot(index, thenPaste: true)
                 }
             }
         }

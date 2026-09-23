@@ -44,7 +44,7 @@ cat > "$STAGE/$APP/Contents/Info.plist" <<'EOF'
 	<key>CFBundleShortVersionString</key>
 	<string>1.1</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
+	<string>27.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>

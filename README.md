@@ -51,10 +51,16 @@ Open via **Settings…** in the menu. Two sections:
   - *Save a copy to folder* with a chooseable destination
   - *Include device name in filename* (e.g. `iPhone 15 Pro 2026-07-08 at 14.30.52.png`)
   - *Play sound after capture*
-- **Shortcuts** — global hotkeys for **Capture** and **Capture & Paste** on
-  devices 1…6. Each shortcut targets the device at that discovery position in
-  the menu (top to bottom); the assigned shortcut is shown next to the device.
-  Click "Record shortcut" and type a combination; Esc cancels, Delete clears.
+- **Shortcuts** — six fixed slots, each with a **Capture** and a **Capture &
+  Paste** hotkey. Shortcuts belong to the slot; devices remember theirs:
+  - A newly connected physical device takes the first empty slot (simulators
+    are only slotted by hand).
+  - A disconnected device keeps its slot and shows as Disconnected.
+  - Drag a device onto another slot to move it (occupied slots swap), or
+    click × to free a slot. A device cleared while connected isn't
+    re-assigned until it reconnects.
+  - The menu lists connected devices in slot order with their shortcut.
+  Click "Record" and type a combination; Esc cancels, Delete clears.
   Capture works system-wide without opening the menu (Carbon
   `RegisterEventHotKey`). Capture & Paste also posts ⌘V into the frontmost app
   and prompts for Accessibility permission on first use.

@@ -14,16 +14,6 @@ final class DeviceDiscoveryTests: XCTestCase {
         XCTAssertEqual(shortcut.modifierFlags, [.command])
     }
 
-    func testDiscoveryOrderIsRetainedForShortcutSlots() {
-        let android = Device(id: "android", name: "Pixel", detail: "Android", kind: .android, available: true)
-        let iphone = Device(id: "iphone", name: "iPhone", detail: "iOS", kind: .ios, available: true)
-        let simulator = Device(id: "simulator", name: "Simulator", detail: "iOS", kind: .simulator, available: true)
-
-        let discovered = [android, simulator, iphone]
-
-        XCTAssertEqual(discovered.map(\.id), ["android", "simulator", "iphone"])
-    }
-
     func testPhysicalConnectedIOSDeviceIsListed() throws {
         let data = try JSONSerialization.data(withJSONObject: [
             "result": [

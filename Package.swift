@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "DeviceShots",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS("27.0")],
     targets: [
         .executableTarget(name: "DeviceShots", path: "Sources/DeviceShots"),
         .testTarget(name: "DeviceShotsTests", dependencies: ["DeviceShots"])

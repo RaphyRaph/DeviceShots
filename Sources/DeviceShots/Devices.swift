@@ -4,7 +4,7 @@ struct CaptureError: Error {
     let message: String
 }
 
-enum DeviceKind: String {
+enum DeviceKind: String, Codable {
     case android = "Android"
     case ios = "iOS"
     case simulator = "Simulator"
@@ -17,6 +17,12 @@ struct Device: Identifiable, Equatable {
     let kind: DeviceKind
     let available: Bool     // false when paired but not reachable right now
     var isTablet = false
+    /// Android `ro.serialno`. adb's own serial for a Wi‑Fi device is ip:port,
+    /// which changes between sessions, so it can't identify the device.
+    var hardwareSerial: String?
+
+    /// Identity that survives reconnects; used to remember a device's slot.
+    var persistentID: String { hardwareSerial ?? id }
 
     var icon: String { isTablet ? "apps.ipad" : "apps.iphone" }
 }
@@ -284,49 +290,56 @@ enum DeviceDiscovery {
             pending.append(Pending(serial: serial, state: state, name: name))
         }
 
-        let versions: [String]
+        let props: [AndroidProps]
         if LatencyOpts.parallelGetprop {
-            versions = await withTaskGroup(of: (Int, String).self, returning: [String].self) { group in
+            props = await withTaskGroup(of: (Int, AndroidProps).self, returning: [AndroidProps].self) { group in
                 for (index, item) in pending.enumerated() {
                     group.addTask {
-                        guard item.state == "device" else { return (index, "") }
-                        let versionResult = await runADBCommand(["-s", item.serial, "shell", "getprop", "ro.build.version.release"])
-                        let version = versionResult.succeeded
-                            ? versionResult.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
-                            : ""
-                        return (index, version)
+                        guard item.state == "device" else { return (index, AndroidProps()) }
+                        return (index, await androidProps(serial: item.serial))
                     }
                 }
-                var collected = Array(repeating: "", count: pending.count)
-                for await (index, version) in group {
-                    collected[index] = version
+                var collected = Array(repeating: AndroidProps(), count: pending.count)
+                for await (index, value) in group {
+                    collected[index] = value
                 }
                 return collected
             }
         } else {
-            var collected: [String] = []
+            var collected: [AndroidProps] = []
             for item in pending {
-                if item.state == "device" {
-                    let versionResult = await runADBCommand(["-s", item.serial, "shell", "getprop", "ro.build.version.release"])
-                    collected.append(
-                        versionResult.succeeded
-                            ? versionResult.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
-                            : ""
-                    )
-                } else {
-                    collected.append("")
-                }
+                collected.append(item.state == "device" ? await androidProps(serial: item.serial) : AndroidProps())
             }
-            versions = collected
+            props = collected
         }
 
-        return zip(pending, versions).map { item, version in
-            let detail = version.isEmpty ? "Android" : "Android \(displayOSVersion(version))"
+        return zip(pending, props).map { item, props in
+            let detail = props.version.isEmpty ? "Android" : "Android \(displayOSVersion(props.version))"
             let isTablet = ["tab", "pad", "tablet"].contains { item.name.lowercased().contains($0) }
             return Device(id: item.serial, name: item.name, detail: detail,
                           kind: .android, available: item.state == "device",
-                          isTablet: isTablet)
+                          isTablet: isTablet, hardwareSerial: props.hardwareSerial)
         }
+    }
+
+    struct AndroidProps {
+        var version = ""
+        var hardwareSerial: String?
+    }
+
+    /// Reads OS version and hardware serial in one adb round-trip.
+    private static func androidProps(serial: String) async -> AndroidProps {
+        let result = await runADBCommand(["-s", serial, "shell", "getprop ro.build.version.release; getprop ro.serialno"])
+        guard result.succeeded else { return AndroidProps() }
+        return parseAndroidProps(result.stdoutText)
+    }
+
+    static func parseAndroidProps(_ output: String) -> AndroidProps {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let version = lines.first ?? ""
+        let hardwareSerial = lines.count > 1 && !lines[1].isEmpty ? lines[1] : nil
+        return AndroidProps(version: version, hardwareSerial: hardwareSerial)
     }
 
     // MARK: Physical iOS devices via devicectl
