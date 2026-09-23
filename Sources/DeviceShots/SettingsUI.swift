@@ -157,9 +157,45 @@ struct CaptureSettingsView: View {
     }
 }
 
+/// Live Shortcuts tab: feeds the slot list from the stores and polls
+/// discovery while visible so connect/disconnect shows up live.
 struct ShortcutsSettingsView: View {
     @ObservedObject private var slots = SlotStore.shared
     @ObservedObject private var devices = DeviceStore.shared
+
+    var body: some View {
+        ShortcutSlotsList(
+            slots: slots.state.slots,
+            connectedIDs: Set(devices.devices.filter(\.available).map(\.persistentID)),
+            actions: .init(
+                clear: { slots.clear(slot: $0) },
+                drop: { slots.drop(persistentID: $0, on: $1) },
+                setShortcut: { slots.setShortcut($0, kind: $1, slot: $2) }
+            )
+        )
+        .task {
+            while !Task.isCancelled {
+                await devices.refresh()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+}
+
+/// The slot list, driven only by its inputs so previews and snapshots can
+/// render any state without real devices.
+struct ShortcutSlotsList: View {
+    struct Actions {
+        var clear: (_ slot: Int) -> Void = { _ in }
+        var drop: (_ persistentID: String, _ slot: Int) -> Void = { _, _ in }
+        var setShortcut: (_ shortcut: Shortcut?, _ kind: ShortcutKind, _ slot: Int) -> Void = { _, _, _ in }
+    }
+
+    let slots: [Slot]
+    let connectedIDs: Set<String>
+    var actions = Actions()
+    /// Shows the drag grip on this row as if hovered (previews/snapshots).
+    var forceHoverSlot: Int?
 
     private let columnWidth: CGFloat = 120
 
@@ -177,44 +213,35 @@ struct ShortcutsSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-                ForEach(Array(slots.state.slots.enumerated()), id: \.element.id) { index, slot in
-                    slotRow(index, device: slot.device)
+                ForEach(Array(slots.enumerated()), id: \.element.id) { index, slot in
+                    slotRow(index, slot: slot)
                 }
                 // Spare row (index == count): drop a device here to move it,
                 // or record a shortcut before its device arrives.
-                slotRow(slots.state.slots.count, device: nil)
+                slotRow(slots.count, slot: Slot())
             }
         }
         .formStyle(.grouped)
-        .task {
-            // Poll while visible so connect/disconnect shows up live.
-            while !Task.isCancelled {
-                await devices.refresh()
-                try? await Task.sleep(for: .seconds(5))
-            }
-        }
     }
 
-    private func slotRow(_ slot: Int, device: SlottedDevice?) -> some View {
+    private func slotRow(_ index: Int, slot: Slot) -> some View {
         HStack(spacing: 8) {
             SlotDeviceCell(
-                slotted: device,
-                isConnected: device.map { devices.connectedDevice(persistentID: $0.persistentID) != nil } ?? false,
-                onClear: { slots.clear(slot: slot) },
-                onDrop: { slots.drop(persistentID: $0, on: slot) }
+                slotted: slot.device,
+                isConnected: slot.device.map { connectedIDs.contains($0.persistentID) } ?? false,
+                forceHover: forceHoverSlot == index,
+                onClear: { actions.clear(index) },
+                onDrop: { actions.drop($0, index) }
             )
-            ShortcutRecorder(shortcut: shortcutBinding(.capture, slot: slot))
+            ShortcutRecorder(shortcut: binding(slot.capture, .capture, index))
                 .frame(width: columnWidth)
-            ShortcutRecorder(shortcut: shortcutBinding(.paste, slot: slot))
+            ShortcutRecorder(shortcut: binding(slot.paste, .paste, index))
                 .frame(width: columnWidth)
         }
     }
 
-    private func shortcutBinding(_ kind: ShortcutKind, slot: Int) -> Binding<Shortcut?> {
-        Binding(
-            get: { slots.state.shortcut(kind, slot: slot) },
-            set: { slots.setShortcut($0, kind: kind, slot: slot) }
-        )
+    private func binding(_ value: Shortcut?, _ kind: ShortcutKind, _ index: Int) -> Binding<Shortcut?> {
+        Binding(get: { value }, set: { actions.setShortcut($0, kind, index) })
     }
 }
 
@@ -223,6 +250,7 @@ struct ShortcutsSettingsView: View {
 private struct SlotDeviceCell: View {
     let slotted: SlottedDevice?
     let isConnected: Bool
+    var forceHover = false
     let onClear: () -> Void
     let onDrop: (String) -> Void
 
@@ -261,7 +289,7 @@ private struct SlotDeviceCell: View {
     private var content: some View {
         if let slotted {
             HStack(spacing: 4) {
-                DragHandle(payload: slotted.persistentID, name: slotted.name, isVisible: isHovering)
+                DragHandle(payload: slotted.persistentID, name: slotted.name, isVisible: isHovering || forceHover)
                 DeviceLabel(name: slotted.name,
                             status: isConnected ? "Connected" : "Disconnected",
                             statusColor: isConnected ? .green : .secondary,

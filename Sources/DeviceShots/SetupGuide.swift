@@ -14,10 +14,13 @@ struct SetupConfig {
         ("Before you start", [installed ? "✓ **\(tool)** is installed." : howTo])
     }
 
-    static let android = SetupConfig(
+    static let android = androidGuide(adbInstalled: adbPath != nil)
+    static let ios = iosGuide(xcodeInstalled: hasXcodeTools)
+
+    static func androidGuide(adbInstalled: Bool) -> SetupConfig { SetupConfig(
         title: "Android device",
         sections: [
-            prerequisite("adb", installed: adbPath != nil,
+            prerequisite("adb", installed: adbInstalled,
                          howTo: "Install **adb** (Android’s device tool) by running this in Terminal, then relaunch Device Shots:\u{2028}**brew install android-platform-tools**"),
             ("On your Android device", [
                 "Turn on **Developer options**: open Settings → About phone and tap **Build number** 7 times.",
@@ -30,12 +33,12 @@ struct SetupConfig {
             ]),
         ],
         footnote: "The device then appears in the Device Shots menu. If it doesn’t, check the phone for the “Allow USB debugging?” prompt."
-    )
+    ) }
 
-    static let ios = SetupConfig(
+    static func iosGuide(xcodeInstalled: Bool) -> SetupConfig { SetupConfig(
         title: "iPhone or iPad",
         sections: [
-            prerequisite("Xcode", installed: hasXcodeTools,
+            prerequisite("Xcode", installed: xcodeInstalled,
                          howTo: "Install **Xcode** from the App Store, open it once to finish setup, then relaunch Device Shots."),
             ("On your iPhone or iPad", [
                 "Connect it to this Mac with a USB cable.",
@@ -47,7 +50,7 @@ struct SetupConfig {
             ]),
         ],
         footnote: "The device then appears in the Device Shots menu. The first pairing can take a minute. Afterwards it also works over Wi‑Fi on the same network."
-    )
+    ) }
 }
 
 extension SetupConfig {
@@ -94,18 +97,24 @@ extension SetupConfig {
         return result
     }
 
+    static let instructionsWidth: CGFloat = 340
+
+    /// The alert's body label; also used by previews and snapshots.
     @MainActor
-    func showAlert() {
-        let width: CGFloat = 340
+    func makeInstructionsLabel() -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: "")
         label.attributedStringValue = formattedInstructions()
         label.isSelectable = true  // so the install command can be copied
-        label.preferredMaxLayoutWidth = width
-        label.frame.size = NSSize(width: width, height: label.fittingSize.height)
+        label.preferredMaxLayoutWidth = Self.instructionsWidth
+        label.frame.size = NSSize(width: Self.instructionsWidth, height: label.fittingSize.height)
+        return label
+    }
 
+    @MainActor
+    func showAlert() {
         let alert = NSAlert()
         alert.messageText = "Set up your \(title)"
-        alert.accessoryView = label
+        alert.accessoryView = makeInstructionsLabel()
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
