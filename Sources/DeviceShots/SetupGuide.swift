@@ -7,12 +7,18 @@ struct SetupConfig {
     /// Sections of (header, steps); steps are numbered continuously across sections.
     let sections: [(header: String, steps: [String])]
     let footnote: String
-    /// Missing prerequisite on this Mac, shown before the steps.
-    let warning: String?
+
+    /// First step: the Mac-side tool each platform needs. Reads as done when
+    /// it's already installed.
+    static func prerequisite(_ tool: String, installed: Bool, howTo: String) -> (header: String, steps: [String]) {
+        ("Before you start", [installed ? "✓ **\(tool)** is installed." : howTo])
+    }
 
     static let android = SetupConfig(
         title: "Android device",
         sections: [
+            prerequisite("adb", installed: adbPath != nil,
+                         howTo: "Install **adb** (Android’s device tool) by running this in Terminal, then relaunch Device Shots:\u{2028}**brew install android-platform-tools**"),
             ("On your Android device", [
                 "Turn on **Developer options**: open Settings → About phone and tap **Build number** 7 times.",
                 "Turn on **USB debugging**: Settings → System → Developer options.",
@@ -23,15 +29,14 @@ struct SetupConfig {
                 "If asked “Allow accessory to connect?”, click **Allow**.",
             ]),
         ],
-        footnote: "The device then appears in the Device Shots menu. If it doesn’t, check the phone for the “Allow USB debugging?” prompt.",
-        warning: adbPath == nil
-            ? "Android capture needs **adb**. Install it with **brew install android-platform-tools**, then relaunch Device Shots."
-            : nil
+        footnote: "The device then appears in the Device Shots menu. If it doesn’t, check the phone for the “Allow USB debugging?” prompt."
     )
 
     static let ios = SetupConfig(
         title: "iPhone or iPad",
         sections: [
+            prerequisite("Xcode", installed: hasXcodeTools,
+                         howTo: "Install **Xcode** from the App Store, open it once to finish setup, then relaunch Device Shots."),
             ("On your iPhone or iPad", [
                 "Connect it to this Mac with a USB cable.",
                 "Unlock it and tap **Trust** when asked to trust this computer.",
@@ -41,10 +46,7 @@ struct SetupConfig {
                 "If asked “Allow accessory to connect?”, click **Allow**.",
             ]),
         ],
-        footnote: "The device then appears in the Device Shots menu. The first pairing can take a minute. Afterwards it also works over Wi‑Fi on the same network.",
-        warning: hasXcodeTools
-            ? nil
-            : "iPhone and iPad capture needs **Xcode**. Install it from the App Store, open it once to finish setup, then relaunch Device Shots."
+        footnote: "The device then appears in the Device Shots menu. The first pairing can take a minute. Afterwards it also works over Wi‑Fi on the same network."
     )
 }
 
@@ -77,14 +79,9 @@ extension SetupConfig {
             result.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
         }
 
-        if let warning {
-            append(warning, style: paragraph(), color: .systemOrange)
-        }
-
         var stepNumber = 0
         for (sectionIndex, section) in sections.enumerated() {
-            let isFirst = sectionIndex == 0 && warning == nil
-            append("**\(section.header)**", style: paragraph(spacingBefore: isFirst ? 0 : 10))
+            append("**\(section.header)**", style: paragraph(spacingBefore: sectionIndex == 0 ? 0 : 10))
             for step in section.steps {
                 stepNumber += 1
                 append("\(stepNumber).\t\(step)", style: paragraph(indent: 18))
@@ -102,7 +99,7 @@ extension SetupConfig {
         let width: CGFloat = 340
         let label = NSTextField(wrappingLabelWithString: "")
         label.attributedStringValue = formattedInstructions()
-        label.isSelectable = false
+        label.isSelectable = true  // so the install command can be copied
         label.preferredMaxLayoutWidth = width
         label.frame.size = NSSize(width: width, height: label.fittingSize.height)
 
