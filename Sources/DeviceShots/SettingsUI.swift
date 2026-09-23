@@ -83,25 +83,27 @@ struct CaptureSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Copy to clipboard", selection: $clipboardMode) {
+                // A second Text in a control's label renders as its subtitle,
+                // keeping the caption in the same row (no divider).
+                Picker(selection: $clipboardMode) {
                     ForEach(ClipboardMode.allCases) { mode in
                         Text(mode.label).tag(mode.rawValue)
                     }
+                } label: {
+                    Text("Copy to clipboard")
+                    Text("Adjust this option if you've encountered any issues with pasting from clipboard or clipboard managers.")
                 }
                 .pickerStyle(.menu)
-                Text("Adjust this option if you've encountered any issues with pasting from clipboard or clipboard managers.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
 
-                Picker("Android format", selection: $androidCaptureFormat) {
+                Picker(selection: $androidCaptureFormat) {
                     ForEach(AndroidCaptureFormat.allCases) { format in
                         Text(format.label).tag(format.rawValue)
                     }
+                } label: {
+                    Text("Android format")
+                    Text("JPEG is usually faster to capture. Falls back to PNG if the device doesn’t support JPEG screencap.")
                 }
                 .pickerStyle(.menu)
-                Text("JPEG is usually faster to capture. Falls back to PNG if the device doesn’t support JPEG screencap.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -115,18 +117,18 @@ struct CaptureSettingsView: View {
                             Button("Choose…", action: chooseFolder)
                         }
                     }
-                    Toggle("Include device name in filename", isOn: $filenameIncludesDevice)
-                    Text(filenameExample)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Toggle(isOn: $filenameIncludesDevice) {
+                        Text("Include device name in filename")
+                        Text(filenameExample)
+                    }
                 }
             }
 
             Section {
-                Toggle("Play sound after successful capture", isOn: $playSound)
-                Text("A failure always plays an error sound.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Toggle(isOn: $playSound) {
+                    Text("Play sound after successful capture")
+                    Text("A failure always plays an error sound.")
+                }
             }
         }
         .formStyle(.grouped)
@@ -168,9 +170,9 @@ struct ShortcutsSettingsView: View {
                 HStack(spacing: 8) {
                     Text("Device")
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Capture")
+                    ShortcutColumnHeader(title: "Capture")
                         .frame(width: columnWidth)
-                    Text("Capture & Paste")
+                    ShortcutColumnHeader(title: "Capture & Paste")
                         .frame(width: columnWidth)
                 }
                 .font(.caption)
@@ -224,12 +226,16 @@ private struct SlotDeviceCell: View {
     let onDrop: (String) -> Void
 
     @State private var isDropTargeted = false
+    @State private var isHovering = false
+
+    /// Same height whether the slot is empty, connected or disconnected.
+    private static let height: CGFloat = 40
 
     var body: some View {
         content
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+            .padding(.trailing, 6)
+            .frame(maxWidth: .infinity, minHeight: Self.height, maxHeight: Self.height, alignment: .leading)
+            .onHover { isHovering = $0 }
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(isDropTargeted ? Color.accentColor.opacity(0.15) : .clear)
@@ -253,10 +259,12 @@ private struct SlotDeviceCell: View {
     @ViewBuilder
     private var content: some View {
         if let slotted {
-            HStack(spacing: 8) {
-                DeviceLabel(name: slotted.name, icon: slotted.icon,
+            HStack(spacing: 4) {
+                DragHandle(payload: slotted.persistentID, name: slotted.name, isVisible: isHovering)
+                DeviceLabel(name: slotted.name,
                             status: isConnected ? "Connected" : "Disconnected",
-                            isConnected: isConnected)
+                            statusColor: isConnected ? .green : .secondary,
+                            isDimmed: !isConnected)
                 Spacer(minLength: 4)
                 Button(action: onClear) {
                     Image(systemName: "xmark.circle.fill")
@@ -266,14 +274,60 @@ private struct SlotDeviceCell: View {
                 .help("Free this slot")
                 .accessibilityLabel("Remove \(slotted.name) from this slot")
             }
-            .draggable(slotted.persistentID) {
-                DeviceLabel(name: slotted.name, icon: slotted.icon, status: nil, isConnected: true)
+        } else {
+            HStack(spacing: 4) {
+                Color.clear.frame(width: DragHandle.width)
+                Text("Empty")
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
+/// Leading grip, shown on row hover; the only place a drag can start.
+private struct DragHandle: View {
+    static let width: CGFloat = 18
+
+    let payload: String
+    let name: String
+    let isVisible: Bool
+
+    var body: some View {
+        // SF Symbols has no 2×3 dot grid, so draw the grip directly.
+        VStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { _ in
+                HStack(spacing: 3) {
+                    Circle().frame(width: 3, height: 3)
+                    Circle().frame(width: 3, height: 3)
+                }
+            }
+        }
+            .foregroundStyle(.secondary)
+            .frame(width: Self.width, height: 28)
+            .contentShape(Rectangle())
+            .opacity(isVisible ? 1 : 0)
+            .draggable(payload) {
+                DeviceLabel(name: name, status: nil)
                     .padding(6)
             }
-        } else {
-            Text("Empty")
-                .foregroundStyle(.tertiary)
+            .help("Drag to move")
+            .accessibilityLabel("Move \(name)")
+    }
+}
+
+private struct UnslottedDeviceRow: View {
+    let device: Device
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            DragHandle(payload: device.persistentID, name: device.name, isVisible: isHovering)
+            DeviceLabel(name: device.name,
+                        status: device.kind == .simulator ? "Simulator" : device.detail)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
     }
 }
 
@@ -290,21 +344,15 @@ private struct UnslottedDevicesView: View {
             if devices.isEmpty {
                 Text("None. Drag a device here to free its slot.")
                     .foregroundStyle(.tertiary)
+                    .padding(.leading, DragHandle.width + 4)
             } else {
                 ForEach(devices) { device in
-                    DeviceLabel(name: device.name, icon: device.icon,
-                                status: device.kind == .simulator ? "Simulator" : device.detail,
-                                isConnected: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .draggable(device.persistentID) {
-                            DeviceLabel(name: device.name, icon: device.icon, status: nil, isConnected: true)
-                                .padding(6)
-                        }
+                    UnslottedDeviceRow(device: device)
                 }
             }
         }
-        .padding(6)
+        .padding(.vertical, 6)
+        .padding(.trailing, 6)
         .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 6)
@@ -325,26 +373,20 @@ private struct UnslottedDevicesView: View {
 
 private struct DeviceLabel: View {
     let name: String
-    let icon: String
     let status: String?
-    let isConnected: Bool
+    var statusColor: Color = .secondary
+    var isDimmed = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(isConnected ? .primary : .tertiary)
-                .frame(width: 20)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name)
+        VStack(alignment: .leading, spacing: 1) {
+            Text(name)
+                .lineLimit(1)
+                .foregroundStyle(isDimmed ? .secondary : .primary)
+            if let status {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(statusColor)
                     .lineLimit(1)
-                    .foregroundStyle(isConnected ? .primary : .secondary)
-                if let status {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
             }
         }
         .accessibilityElement(children: .combine)

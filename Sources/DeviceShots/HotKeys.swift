@@ -226,17 +226,22 @@ enum KeyDisplay {
 // MARK: - Recorder control (CleanShot-style "Record shortcut" button)
 
 struct ShortcutRecorder: View {
+    /// Fixed trailing slot for the clear button, reserved even when hidden so
+    /// column headers can align with the record button (see `ShortcutColumnHeader`).
+    static let clearSlotWidth: CGFloat = 16
+    static let spacing: CGFloat = 4
+
     @Binding var shortcut: Shortcut?
     @State private var isRecording = false
     @State private var monitor: Any?
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Self.spacing) {
             Button(action: { isRecording ? stopRecording() : startRecording() }) {
                 Text(isRecording ? "Type…" : (shortcut?.display ?? "Record"))
                     .font(.callout.monospaced())
                     .foregroundStyle(labelColor)
-                    .frame(minWidth: 70)
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
             .overlay(
@@ -251,6 +256,7 @@ struct ShortcutRecorder: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
+            .frame(width: Self.clearSlotWidth)
             .opacity(shortcut != nil && !isRecording ? 1 : 0)
             .disabled(shortcut == nil || isRecording)
         }
@@ -299,5 +305,19 @@ struct ShortcutRecorder: View {
         }
         shortcut = Shortcut(keyCode: event.keyCode, modifiers: flags.rawValue)
         stopRecording()
+    }
+}
+
+/// Column title centered over the record button, not the whole recorder.
+struct ShortcutColumnHeader: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: ShortcutRecorder.spacing) {
+            Text(title)
+                .frame(maxWidth: .infinity)
+            Color.clear
+                .frame(width: ShortcutRecorder.clearSlotWidth, height: 1)
+        }
     }
 }

@@ -1,15 +1,55 @@
 import SwiftUI
 import AppKit
 import Combine
+import os
+
+let discoveryLog = Logger(subsystem: "com.raphael.deviceshots", category: "discovery")
 
 @main
 struct DeviceShotsApp: App {
     @NSApplicationDelegateAdaptor(AppLifecycle.self) private var appLifecycle
 
     var body: some Scene {
+        // Invisible scene that hands SwiftUI's openSettings action to the
+        // AppKit menu; the private showSettingsWindow: selector no longer works.
+        Window("Settings Bridge", id: SettingsBridge.windowID) {
+            SettingsBridge()
+        }
+        .windowStyle(.plain)
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.presented)
+        .restorationBehavior(.disabled)
+
         Settings {
             SettingsView()
         }
+    }
+}
+
+@MainActor
+enum SettingsOpener {
+    fileprivate static var action: OpenSettingsAction?
+
+    static func open() {
+        action?()
+        NSApp.activate()
+    }
+}
+
+private struct SettingsBridge: View {
+    static let windowID = "settings-bridge"
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onAppear {
+                SettingsOpener.action = openSettings
+                // Keep the scene alive (so the action stays valid) but off screen.
+                NSApp.windows
+                    .filter { $0.identifier?.rawValue.hasPrefix(Self.windowID) == true }
+                    .forEach { $0.orderOut(nil) }
+            }
     }
 }
 
@@ -150,8 +190,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showSettings(_ sender: NSMenuItem) {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        NSApp.activate(ignoringOtherApps: true)
+        SettingsOpener.open()
     }
 
     @objc private func showSetup(_ sender: NSMenuItem) {
@@ -190,7 +229,14 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItemController = StatusItemController(store: DeviceStore.shared)
+        // Discover at launch so the menu and hotkeys don't start empty.
+        Task { await DeviceStore.shared.refresh() }
         CaptureLatencyBench.runIfRequested()
+    }
+
+    /// Menu-bar app: hiding the settings bridge or closing Settings must not quit.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -227,9 +273,14 @@ final class DeviceStore: ObservableObject {
     var isCapturingAnyDevice: Bool { !capturing.isEmpty }
 
     func refresh() async {
-        guard !isRefreshing else { return }
+        guard !isRefreshing else {
+            discoveryLog.notice("refresh skipped: one already in flight")
+            return
+        }
         isRefreshing = true
+        let started = Date()
         let found = await DeviceDiscovery.allDevices()
+        discoveryLog.notice("refresh: \(found.count) device(s) in \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s: \(found.map { "\($0.kind.rawValue):\($0.name)[\($0.available ? "on" : "off")]" }.joined(separator: ", "), privacy: .public)")
         // Update slots before publishing devices so the menu rebuild sees both.
         SlotStore.shared.reconcile(with: found)
         devices = found
