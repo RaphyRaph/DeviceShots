@@ -1,6 +1,6 @@
 import XCTest
 import SwiftUI
-@testable import DeviceShots
+@testable import DeviceShotsKit
 
 /// Renders every Settings and setup-guide state to PNGs (light and dark).
 /// Skipped unless SNAPSHOT_DIR is set; run via ./snapshots.sh.

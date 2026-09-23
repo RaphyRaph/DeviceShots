@@ -1,5 +1,5 @@
 import XCTest
-@testable import DeviceShots
+@testable import DeviceShotsKit
 
 final class DeviceDiscoveryTests: XCTestCase {
     func testShortcutNormalizesKeypadDigitsAndSideSpecificModifierBits() {

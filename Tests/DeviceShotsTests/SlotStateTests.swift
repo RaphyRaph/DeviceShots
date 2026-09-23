@@ -1,5 +1,5 @@
 import XCTest
-@testable import DeviceShots
+@testable import DeviceShotsKit
 
 final class SlotStateTests: XCTestCase {
     private let pixel = Device(id: "adb-1", name: "Pixel 10 Pro", detail: "Android 17", kind: .android, available: true)
