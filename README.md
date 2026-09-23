@@ -7,6 +7,10 @@ camera icon in the menu bar.
 Great for pasting UI screenshots in Figma for QA, or referencing screenshots and sharing them in chats. 
 Much faster than native screenshot flows.
 
+| Device menu | Capture settings | Device shortcuts |
+|:---:|:---:|:---:|
+| ![Device Shots menu showing connected iOS and Android devices](docs/images/menu-light.png) | ![Capture settings for clipboard, Android format, saving, and sound](docs/images/settings-capture-light.png) | ![Shortcut settings for per-device capture and capture-and-paste hotkeys](docs/images/settings-shortcuts-light.png) |
+
 ## Install
 
 Download the latest `DeviceShots-vX.Y.zip` from
