@@ -15,6 +15,7 @@ drag Device Shots.app to /Applications. The app is notarized by Apple.
 
 Requirements:
 
+- **macOS 27** or later
 - **Xcode** (for iOS devices and simulators — the app uses its `devicectl`
   and `simctl` tools)
 - **adb** for Android devices: `brew install android-platform-tools`
