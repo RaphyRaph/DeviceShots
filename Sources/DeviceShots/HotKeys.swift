@@ -128,66 +128,6 @@ final class HotKeyCenter {
     }
 }
 
-// MARK: - Persisted shortcut slots (Device 1…N)
-
-@MainActor
-final class ShortcutStore: ObservableObject {
-    static let shared = ShortcutStore()
-    static let slotCount = SlotState.count
-    private static let captureKey = "deviceShortcuts"
-    private static let pasteKey = "devicePasteShortcuts"
-
-    @Published var captureShortcuts: [Shortcut?] {
-        didSet { save(captureShortcuts, key: Self.captureKey); registerAll() }
-    }
-    @Published var pasteShortcuts: [Shortcut?] {
-        didSet { save(pasteShortcuts, key: Self.pasteKey); registerAll() }
-    }
-
-    private init() {
-        captureShortcuts = Self.load(key: Self.captureKey)
-        pasteShortcuts = Self.load(key: Self.pasteKey)
-        registerAll()
-    }
-
-    private static func load(key: String) -> [Shortcut?] {
-        var loaded = [Shortcut?](repeating: nil, count: slotCount)
-        if let data = UserDefaults.standard.data(forKey: key),
-           let decoded = try? JSONDecoder().decode([Shortcut?].self, from: data) {
-            for (index, shortcut) in decoded.prefix(slotCount).enumerated() {
-                loaded[index] = shortcut
-            }
-        }
-        return loaded
-    }
-
-    private func save(_ shortcuts: [Shortcut?], key: String) {
-        if let data = try? JSONEncoder().encode(shortcuts) {
-            UserDefaults.standard.set(data, forKey: key)
-        }
-    }
-
-    private func registerAll() {
-        HotKeyCenter.shared.unregisterAll()
-        for (index, shortcut) in captureShortcuts.enumerated() {
-            guard let shortcut else { continue }
-            HotKeyCenter.shared.register(shortcut) {
-                Task { @MainActor in
-                    await DeviceStore.shared.captureSlot(index)
-                }
-            }
-        }
-        for (index, shortcut) in pasteShortcuts.enumerated() {
-            guard let shortcut else { continue }
-            HotKeyCenter.shared.register(shortcut) {
-                Task { @MainActor in
-                    await DeviceStore.shared.captureSlot(index, thenPaste: true)
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Key display helpers
 
 enum KeyDisplay {

@@ -6,28 +6,36 @@ final class SlotStateTests: XCTestCase {
     private let iphone = Device(id: "IPHONE", name: "iPhone", detail: "iOS 27", kind: .ios, available: true)
     private let ipad = Device(id: "IPAD", name: "iPad Pro", detail: "iOS 27", kind: .ios, available: true, isTablet: true)
     private let simulator = Device(id: "SIM", name: "iPhone 17", detail: "iOS 27", kind: .simulator, available: true)
+    private let cmd1 = Shortcut(keyCode: 18, modifiers: NSEvent.ModifierFlags.command.rawValue)
+    private let cmd2 = Shortcut(keyCode: 19, modifiers: NSEvent.ModifierFlags.command.rawValue)
 
     private func ids(_ state: SlotState) -> [String?] {
-        state.slots.map { $0?.persistentID }
+        state.slots.map { $0.device?.persistentID }
     }
 
-    func testNewPhysicalDevicesTakeFirstFreeSlotsAndSimulatorsDoNot() {
+    func testNewPhysicalDevicesGetNewSlotsAndSimulatorsDoNot() {
         let state = SlotState().reconciled(with: [pixel, simulator, iphone])
 
-        XCTAssertEqual(ids(state), ["adb-1", "IPHONE", nil, nil, nil, nil])
+        XCTAssertEqual(ids(state), ["adb-1", "IPHONE"])
+    }
+
+    func testNoSlotLimit() {
+        let devices = (1...8).map { Device(id: "D\($0)", name: "D\($0)", detail: "", kind: .ios, available: true) }
+
+        XCTAssertEqual(SlotState().reconciled(with: devices).slots.count, 8)
     }
 
     func testDisconnectedDeviceKeepsItsSlotAndReconnectsIntoIt() {
         var state = SlotState().reconciled(with: [pixel, iphone])
 
-        state = state.reconciled(with: [iphone])            // Pixel unplugged
-        XCTAssertEqual(ids(state), ["adb-1", "IPHONE", nil, nil, nil, nil])
+        state = state.reconciled(with: [iphone])                 // Pixel unplugged
+        XCTAssertEqual(ids(state), ["adb-1", "IPHONE"])
 
-        state = state.reconciled(with: [iphone, ipad])      // new device while Pixel is away
-        XCTAssertEqual(ids(state), ["adb-1", "IPHONE", "IPAD", nil, nil, nil])
+        state = state.reconciled(with: [iphone, ipad])           // new device while Pixel is away
+        XCTAssertEqual(ids(state), ["adb-1", "IPHONE", "IPAD"])
 
-        state = state.reconciled(with: [ipad, iphone, pixel]) // Pixel back, discovery order changed
-        XCTAssertEqual(ids(state), ["adb-1", "IPHONE", "IPAD", nil, nil, nil])
+        state = state.reconciled(with: [ipad, iphone, pixel])    // back, discovery order changed
+        XCTAssertEqual(ids(state), ["adb-1", "IPHONE", "IPAD"])
     }
 
     func testReconcileRefreshesRememberedName() {
@@ -36,7 +44,56 @@ final class SlotStateTests: XCTestCase {
 
         state = state.reconciled(with: [renamed])
 
-        XCTAssertEqual(state.slots[0]?.name, "Raph's iPhone")
+        XCTAssertEqual(state.slots[0].device?.name, "Raph's iPhone")
+    }
+
+    func testClearingSlotWithoutShortcutsDeletesIt() {
+        var state = SlotState().reconciled(with: [pixel, iphone])
+
+        state.clear(slot: 0, isConnected: false)
+
+        XCTAssertEqual(ids(state), ["IPHONE"])
+    }
+
+    func testClearingSlotWithShortcutsKeepsItEmpty() {
+        var state = SlotState().reconciled(with: [pixel, iphone])
+        state.setShortcut(cmd1, kind: .capture, slot: 0)
+
+        state.clear(slot: 0, isConnected: false)
+
+        XCTAssertEqual(ids(state), [nil, "IPHONE"])
+        XCTAssertEqual(state.shortcut(.capture, slot: 0), cmd1)
+    }
+
+    func testNewDeviceTakesShortcutOnlySlotAndInheritsShortcuts() {
+        var state = SlotState()
+        state.setShortcut(cmd1, kind: .paste, slot: 0)          // recorded in the spare row
+        XCTAssertEqual(ids(state), [nil])
+
+        state = state.reconciled(with: [ipad])
+
+        XCTAssertEqual(ids(state), ["IPAD"])
+        XCTAssertEqual(state.shortcut(.paste, slot: 0), cmd1)
+    }
+
+    func testRemovingLastShortcutOfEmptySlotDeletesIt() {
+        var state = SlotState()
+        state.setShortcut(cmd1, kind: .capture, slot: 0)
+        state.setShortcut(cmd2, kind: .paste, slot: 0)
+
+        state.setShortcut(nil, kind: .capture, slot: 0)
+        XCTAssertEqual(state.slots.count, 1, "still has a paste shortcut")
+
+        state.setShortcut(nil, kind: .paste, slot: 0)
+        XCTAssertTrue(state.slots.isEmpty)
+    }
+
+    func testClearingSpareRowShortcutIsNoOp() {
+        var state = SlotState().reconciled(with: [pixel])
+
+        state.setShortcut(nil, kind: .capture, slot: 1)
+
+        XCTAssertEqual(ids(state), ["adb-1"])
     }
 
     func testClearingConnectedDeviceKeepsItOutUntilItReconnects() {
@@ -44,81 +101,52 @@ final class SlotStateTests: XCTestCase {
 
         state.clear(slot: 0, isConnected: true)
         state = state.reconciled(with: [pixel, iphone])
-        XCTAssertEqual(ids(state), [nil, "IPHONE", nil, nil, nil, nil], "still connected: not re-assigned")
+        XCTAssertEqual(ids(state), ["IPHONE"], "still connected: not re-assigned")
 
-        state = state.reconciled(with: [iphone])            // unplugged
-        state = state.reconciled(with: [pixel, iphone])     // plugged back in
-        XCTAssertEqual(ids(state), ["adb-1", "IPHONE", nil, nil, nil, nil])
+        state = state.reconciled(with: [iphone])                 // unplugged
+        state = state.reconciled(with: [pixel, iphone])          // plugged back in
+        XCTAssertEqual(ids(state), ["IPHONE", "adb-1"])
     }
 
-    func testClearingDisconnectedDeviceFreesSlotForNextDevice() {
+    func testMovingOntoOccupiedSlotSwapsDevicesButNotShortcuts() {
         var state = SlotState().reconciled(with: [pixel, iphone])
-        state = state.reconciled(with: [iphone])            // Pixel away
+        state.setShortcut(cmd1, kind: .capture, slot: 0)
+        state.setShortcut(cmd2, kind: .capture, slot: 1)
 
-        state.clear(slot: 0, isConnected: false)
-        state = state.reconciled(with: [iphone, ipad])
+        state.move(from: 0, to: 1)
 
-        XCTAssertEqual(ids(state), ["IPAD", "IPHONE", nil, nil, nil, nil])
+        XCTAssertEqual(ids(state), ["IPHONE", "adb-1"])
+        XCTAssertEqual(state.shortcut(.capture, slot: 0), cmd1)
+        XCTAssertEqual(state.shortcut(.capture, slot: 1), cmd2)
     }
 
-    func testMovingOntoOccupiedSlotSwaps() {
+    func testMovingToSpareRowDeletesTheEmptiedSlot() {
         var state = SlotState().reconciled(with: [pixel, iphone])
 
-        state.place(state.slots[0]!, in: 1)
+        state.move(from: 0, to: 2)                               // spare row
 
-        XCTAssertEqual(ids(state), ["IPHONE", "adb-1", nil, nil, nil, nil])
+        XCTAssertEqual(ids(state), ["IPHONE", "adb-1"])
     }
 
-    func testMovingOntoEmptySlotLeavesOldSlotEmpty() {
-        var state = SlotState().reconciled(with: [pixel])
+    func testMovingToSpareRowKeepsSourceSlotIfItHasShortcuts() {
+        var state = SlotState().reconciled(with: [pixel, iphone])
+        state.setShortcut(cmd1, kind: .capture, slot: 0)
 
-        state.place(state.slots[0]!, in: 4)
+        state.move(from: 0, to: 2)
 
-        XCTAssertEqual(ids(state), [nil, nil, nil, nil, "adb-1", nil])
-    }
-
-    func testPlacingUnslottedDeviceDisplacesOccupantWhichThenTakesFreeSlot() {
-        var state = SlotState().reconciled(with: [pixel, simulator])
-
-        state.place(SlottedDevice(simulator), in: 0)
-        XCTAssertEqual(ids(state), ["SIM", nil, nil, nil, nil, nil])
-
-        state = state.reconciled(with: [pixel, simulator])
-        XCTAssertEqual(ids(state), ["SIM", "adb-1", nil, nil, nil, nil])
-    }
-
-    func testManuallyPlacingClearedDeviceReArmsIt() {
-        var state = SlotState().reconciled(with: [pixel])
-        state.clear(slot: 0, isConnected: true)
-
-        state.place(SlottedDevice(pixel), in: 2)
-
-        XCTAssertFalse(state.cleared.contains("adb-1"))
-        XCTAssertEqual(ids(state), [nil, nil, "adb-1", nil, nil, nil])
-    }
-
-    func testDevicesBeyondSixSlotsStayUnslotted() {
-        let devices = (1...7).map {
-            Device(id: "D\($0)", name: "Device \($0)", detail: "", kind: .ios, available: true)
-        }
-
-        let state = SlotState().reconciled(with: devices)
-
-        XCTAssertEqual(ids(state), ["D1", "D2", "D3", "D4", "D5", "D6"])
-        XCTAssertNil(state.slotIndex(of: "D7"))
+        XCTAssertEqual(ids(state), [nil, "IPHONE", "adb-1"])
+        XCTAssertEqual(state.shortcut(.capture, slot: 0), cmd1)
     }
 
     func testUnavailableDevicesAreNotAutoAssigned() {
         let unauthorized = Device(id: "adb-2", name: "adb-2", detail: "", kind: .android, available: false)
 
-        let state = SlotState().reconciled(with: [unauthorized])
-
-        XCTAssertEqual(ids(state), [nil, nil, nil, nil, nil, nil])
+        XCTAssertTrue(SlotState().reconciled(with: [unauthorized]).slots.isEmpty)
     }
 
     func testMenuOrderIsSlotOrderThenUnslotted() {
         var state = SlotState().reconciled(with: [pixel, iphone])
-        state.place(state.slots[0]!, in: 1)                // iPhone first, Pixel second
+        state.move(from: 0, to: 1)                               // iPhone first, Pixel second
 
         let ordered = state.ordered([pixel, simulator, iphone])
 
@@ -136,7 +164,7 @@ final class SlotStateTests: XCTestCase {
         state = state.reconciled(with: [iphone])
         state = state.reconciled(with: [iphone, overWiFi])
 
-        XCTAssertEqual(ids(state), ["IPHONE", "57131FDCH0016C", nil, nil, nil, nil])
+        XCTAssertEqual(ids(state), ["IPHONE", "57131FDCH0016C"])
     }
 
     func testParseAndroidProps() {
@@ -144,12 +172,12 @@ final class SlotStateTests: XCTestCase {
         XCTAssertEqual(props.version, "17")
         XCTAssertEqual(props.hardwareSerial, "57131FDCH0016C")
 
-        let noSerial = DeviceDiscovery.parseAndroidProps("17\n\n")
-        XCTAssertNil(noSerial.hardwareSerial)
+        XCTAssertNil(DeviceDiscovery.parseAndroidProps("17\n\n").hardwareSerial)
     }
 
     func testStateRoundTripsThroughJSON() throws {
         var state = SlotState().reconciled(with: [pixel, ipad])
+        state.setShortcut(cmd1, kind: .paste, slot: 1)
         state.clear(slot: 0, isConnected: true)
 
         let decoded = try JSONDecoder().decode(SlotState.self, from: JSONEncoder().encode(state))

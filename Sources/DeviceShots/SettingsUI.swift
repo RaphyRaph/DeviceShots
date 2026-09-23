@@ -158,7 +158,6 @@ struct CaptureSettingsView: View {
 }
 
 struct ShortcutsSettingsView: View {
-    @ObservedObject private var shortcuts = ShortcutStore.shared
     @ObservedObject private var slots = SlotStore.shared
     @ObservedObject private var devices = DeviceStore.shared
 
@@ -178,32 +177,12 @@ struct ShortcutsSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-                ForEach(0..<SlotState.count, id: \.self) { slot in
-                    let slotted = slots.state.slots[slot]
-                    HStack(spacing: 8) {
-                        SlotDeviceCell(
-                            slotted: slotted,
-                            isConnected: slotted.map { devices.connectedDevice(persistentID: $0.persistentID) != nil } ?? false,
-                            onClear: { slots.clear(slot: slot) },
-                            onDrop: { slots.drop(persistentID: $0, on: slot) }
-                        )
-                        ShortcutRecorder(shortcut: $shortcuts.captureShortcuts[slot])
-                            .frame(width: columnWidth)
-                        ShortcutRecorder(shortcut: $shortcuts.pasteShortcuts[slot])
-                            .frame(width: columnWidth)
-                    }
+                ForEach(Array(slots.state.slots.enumerated()), id: \.element.id) { index, slot in
+                    slotRow(index, device: slot.device)
                 }
-            } footer: {
-                Text("Shortcuts belong to the slot. A newly connected device takes the first empty slot and keeps it while disconnected. Drag a device onto another slot to move it, or click × to free its slot. Capture & Paste also pastes into the frontmost app (requires the Accessibility permission, prompted on first use).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Other connected devices") {
-                UnslottedDevicesView(
-                    devices: devices.devices.filter { $0.available && slots.state.slotIndex(of: $0.persistentID) == nil },
-                    onDrop: { slots.unslot(persistentID: $0) }
-                )
+                // Spare row (index == count): drop a device here to move it,
+                // or record a shortcut before its device arrives.
+                slotRow(slots.state.slots.count, device: nil)
             }
         }
         .formStyle(.grouped)
@@ -214,6 +193,28 @@ struct ShortcutsSettingsView: View {
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+
+    private func slotRow(_ slot: Int, device: SlottedDevice?) -> some View {
+        HStack(spacing: 8) {
+            SlotDeviceCell(
+                slotted: device,
+                isConnected: device.map { devices.connectedDevice(persistentID: $0.persistentID) != nil } ?? false,
+                onClear: { slots.clear(slot: slot) },
+                onDrop: { slots.drop(persistentID: $0, on: slot) }
+            )
+            ShortcutRecorder(shortcut: shortcutBinding(.capture, slot: slot))
+                .frame(width: columnWidth)
+            ShortcutRecorder(shortcut: shortcutBinding(.paste, slot: slot))
+                .frame(width: columnWidth)
+        }
+    }
+
+    private func shortcutBinding(_ kind: ShortcutKind, slot: Int) -> Binding<Shortcut?> {
+        Binding(
+            get: { slots.state.shortcut(kind, slot: slot) },
+            set: { slots.setShortcut($0, kind: kind, slot: slot) }
+        )
     }
 }
 
@@ -312,62 +313,6 @@ private struct DragHandle: View {
             }
             .help("Drag to move")
             .accessibilityLabel("Move \(name)")
-    }
-}
-
-private struct UnslottedDeviceRow: View {
-    let device: Device
-    @State private var isHovering = false
-
-    var body: some View {
-        HStack(spacing: 4) {
-            DragHandle(payload: device.persistentID, name: device.name, isVisible: isHovering)
-            DeviceLabel(name: device.name,
-                        status: device.kind == .simulator ? "Simulator" : device.detail)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
-    }
-}
-
-/// Connected devices not in a slot. Drag one onto a slot to assign it; drop a
-/// slotted device here to free its slot.
-private struct UnslottedDevicesView: View {
-    let devices: [Device]
-    let onDrop: (String) -> Void
-
-    @State private var isDropTargeted = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if devices.isEmpty {
-                Text("None. Drag a device here to free its slot.")
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, DragHandle.width + 4)
-            } else {
-                ForEach(devices) { device in
-                    UnslottedDeviceRow(device: device)
-                }
-            }
-        }
-        .padding(.vertical, 6)
-        .padding(.trailing, 6)
-        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isDropTargeted ? Color.accentColor.opacity(0.15) : .clear)
-        )
-        .contentShape(Rectangle())
-        .dropDestination(for: String.self) { items, _ in
-            items.forEach(onDrop)
-        }
-        .onDropSessionUpdated { session in
-            switch session.phase {
-            case .entering, .active: isDropTargeted = true
-            default: isDropTargeted = false
-            }
-        }
     }
 }
 

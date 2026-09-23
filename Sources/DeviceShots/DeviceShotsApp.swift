@@ -139,7 +139,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func deviceTitle(_ device: Device, slot: Int?) -> String {
-        let shortcut = slot.flatMap { ShortcutStore.shared.captureShortcuts[$0]?.display }
+        let shortcut = slot.flatMap { SlotStore.shared.state.shortcut(.capture, slot: $0)?.display }
         let shortcutSuffix = shortcut.map { "\t\($0)" } ?? ""
         return "\(device.name)\(shortcutSuffix)"
     }
@@ -228,6 +228,7 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        _ = SlotStore.shared   // loads slots and registers their hotkeys
         statusItemController = StatusItemController(store: DeviceStore.shared)
         // Discover at launch so the menu and hotkeys don't start empty.
         Task { await DeviceStore.shared.refresh() }
@@ -299,7 +300,8 @@ final class DeviceStore: ObservableObject {
         if LatencyOpts.forceHotkeyRefresh || !hasLoadedOnce {
             await refresh()
         }
-        guard let id = SlotStore.shared.state.slots[slot]?.persistentID else {
+        let slots = SlotStore.shared.state.slots
+        guard slots.indices.contains(slot), let id = slots[slot].device?.persistentID else {
             signalError()
             return
         }
