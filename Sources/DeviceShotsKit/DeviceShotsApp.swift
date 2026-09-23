@@ -196,7 +196,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showSetup(_ sender: NSMenuItem) {
-        (sender.representedObject as? SetupConfig)?.showAlert()
+        if let config = sender.representedObject as? SetupConfig { SetupWindow.show(config) }
     }
 
     func tearDown() {

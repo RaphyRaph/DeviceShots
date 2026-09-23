@@ -34,18 +34,6 @@ enum Fixtures {
     ]
 }
 
-/// Setup-guide alert body as a SwiftUI view, for previews and snapshots.
-struct SetupInstructionsPreview: NSViewRepresentable {
-    let config: SetupConfig
-
-    func makeNSView(context: Context) -> NSTextField { config.makeInstructionsLabel() }
-    func updateNSView(_ nsView: NSTextField, context: Context) {}
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {
-        // Fixed width like the alert; height from the wrapped text.
-        CGSize(width: SetupConfig.instructionsWidth, height: nsView.fittingSize.height)
-    }
-}
-
 #Preview("Shortcuts: devices") {
     ShortcutSlotsList(slots: Fixtures.slots, connectedIDs: Fixtures.connectedIDs)
         .frame(width: 640, height: 420)
@@ -92,12 +80,12 @@ struct SetupInstructionsPreview: NSViewRepresentable {
             ForEach(Fixtures.setupGuides, id: \.name) { guide in
                 VStack(alignment: .leading, spacing: 8) {
                     Text(guide.name).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    SetupInstructionsPreview(config: guide.config)
+                    SetupWindowContent(config: guide.config)
                 }
             }
         }
         .padding()
     }
-    .frame(width: 400, height: 700)
+    .frame(width: 420, height: 800)
 }
 #endif

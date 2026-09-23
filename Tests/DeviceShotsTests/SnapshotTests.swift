@@ -42,12 +42,11 @@ final class SnapshotTests: XCTestCase {
         try snapshot("capture-save-to-folder", size: CGSize(width: 640, height: 540)) { CaptureSettingsView() }
     }
 
-    func testSetupGuides() throws {
+    /// The setup window's content (guide + Done button) at its natural size.
+    func testSetupWindows() throws {
         for guide in Fixtures.setupGuides {
-            let height = guide.config.makeInstructionsLabel().frame.height + 32
-            try snapshot(guide.name, size: CGSize(width: SetupConfig.instructionsWidth + 32, height: height)) {
-                SetupInstructionsPreview(config: guide.config).padding(16)
-            }
+            let view = SetupWindowContent(config: guide.config)
+            try snapshot("window-\(guide.name)", size: NSHostingView(rootView: view).fittingSize) { view }
         }
     }
 
@@ -66,11 +65,15 @@ final class SnapshotTests: XCTestCase {
             window.orderFront(nil)
             RunLoop.main.run(until: Date().addingTimeInterval(0.3))
 
-            let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-            host.cacheDisplay(in: host.bounds, to: rep)
-            let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
-            try png.write(to: outputDir.appendingPathComponent("\(name)-\(suffix).png"))
+            try write(host, name: "\(name)-\(suffix)")
             window.orderOut(nil)
         }
+    }
+
+    private func write(_ view: NSView, name: String) throws {
+        let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        try png.write(to: outputDir.appendingPathComponent("\(name).png"))
     }
 }

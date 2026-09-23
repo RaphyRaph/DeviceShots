@@ -1,121 +1,216 @@
+import SwiftUI
 import AppKit
 
+/// One instruction: a short action, how to do it, and optionally a command
+/// to copy. `detail` may use **bold** for words the user looks for on screen.
+struct SetupStep {
+    var title: String
+    var detail: String?
+    var command: String?
+    /// Already satisfied (e.g. the tool is installed): shown with a checkmark
+    /// instead of a number.
+    var isDone = false
+}
+
 /// Connection instructions shown from the menu's "Set up …" items.
-/// Step text may use **bold** for the words the user looks for on screen.
 struct SetupConfig {
     let title: String
-    /// Sections of (header, steps); steps are numbered continuously across sections.
-    let sections: [(header: String, steps: [String])]
+    let sections: [(header: String, steps: [SetupStep])]
     let footnote: String
-
-    /// First step: the Mac-side tool each platform needs. Reads as done when
-    /// it's already installed.
-    static func prerequisite(_ tool: String, installed: Bool, howTo: String) -> (header: String, steps: [String]) {
-        ("Before you start", [installed ? "✓ **\(tool)** is installed." : howTo])
-    }
 
     static let android = androidGuide(adbInstalled: adbPath != nil)
     static let ios = iosGuide(xcodeInstalled: hasXcodeTools)
 
-    static func androidGuide(adbInstalled: Bool) -> SetupConfig { SetupConfig(
-        title: "Android device",
-        sections: [
-            prerequisite("adb", installed: adbInstalled,
-                         howTo: "Install **adb** (Android’s device tool) by running this in Terminal, then relaunch Device Shots:\u{2028}**brew install android-platform-tools**"),
-            ("On your Android device", [
-                "Turn on **Developer options**: open Settings → About phone and tap **Build number** 7 times.",
-                "Turn on **USB debugging**: Settings → System → Developer options.",
-                "Connect it to this Mac with a USB cable. Charge‑only cables won’t work.",
-                "When “Allow USB debugging?” appears, check **Always allow from this computer** and tap **Allow**.",
-            ]),
-            ("On this Mac", [
-                "If asked “Allow accessory to connect?”, click **Allow**.",
-            ]),
-        ],
-        footnote: "The device then appears in the Device Shots menu. If it doesn’t, check the phone for the “Allow USB debugging?” prompt."
-    ) }
+    static func androidGuide(adbInstalled: Bool) -> SetupConfig {
+        SetupConfig(
+            title: "Android device",
+            sections: [
+                ("Before you start", [
+                    adbInstalled
+                        ? SetupStep(title: "adb is installed", isDone: true)
+                        : SetupStep(title: "Install adb",
+                                    detail: "Android’s device tool. Run this in Terminal, then relaunch Device Shots:",
+                                    command: "brew install android-platform-tools"),
+                ]),
+                ("On your Android device", [
+                    SetupStep(title: "Turn on Developer options",
+                              detail: "Settings → About phone → tap **Build number** 7 times."),
+                    SetupStep(title: "Turn on USB debugging",
+                              detail: "Settings → System → Developer options → **USB debugging**."),
+                    SetupStep(title: "Connect it with a USB cable",
+                              detail: "Use a data cable; charge‑only cables won’t work."),
+                    SetupStep(title: "Allow USB debugging",
+                              detail: "Check **Always allow from this computer**, then tap **Allow**."),
+                ]),
+                ("On this Mac", [
+                    SetupStep(title: "Allow the accessory",
+                              detail: "If asked “Allow accessory to connect?”, click **Allow**."),
+                ]),
+            ],
+            footnote: "The device then appears in the Device Shots menu. Not showing up? Check the phone for the “Allow USB debugging?” prompt."
+        )
+    }
 
-    static func iosGuide(xcodeInstalled: Bool) -> SetupConfig { SetupConfig(
-        title: "iPhone or iPad",
-        sections: [
-            prerequisite("Xcode", installed: xcodeInstalled,
-                         howTo: "Install **Xcode** from the App Store, open it once to finish setup, then relaunch Device Shots."),
-            ("On your iPhone or iPad", [
-                "Connect it to this Mac with a USB cable.",
-                "Unlock it and tap **Trust** when asked to trust this computer.",
-                "Turn on **Developer Mode**: Settings → Privacy & Security → Developer Mode. The device restarts; tap **Turn On** when it’s back.",
-            ]),
-            ("On this Mac", [
-                "If asked “Allow accessory to connect?”, click **Allow**.",
-            ]),
-        ],
-        footnote: "The device then appears in the Device Shots menu. The first pairing can take a minute. Afterwards it also works over Wi‑Fi on the same network."
-    ) }
+    static func iosGuide(xcodeInstalled: Bool) -> SetupConfig {
+        SetupConfig(
+            title: "iPhone or iPad",
+            sections: [
+                ("Before you start", [
+                    xcodeInstalled
+                        ? SetupStep(title: "Xcode is installed", isDone: true)
+                        : SetupStep(title: "Install Xcode",
+                                    detail: "Get it from the App Store, open it once to finish setup, then relaunch Device Shots."),
+                ]),
+                ("On your iPhone or iPad", [
+                    SetupStep(title: "Connect it with a USB cable"),
+                    SetupStep(title: "Trust this Mac",
+                              detail: "Unlock the device and tap **Trust** when asked."),
+                    SetupStep(title: "Turn on Developer Mode",
+                              detail: "Settings → Privacy & Security → **Developer Mode**. After the restart, tap **Turn On**."),
+                ]),
+                ("On this Mac", [
+                    SetupStep(title: "Allow the accessory",
+                              detail: "If asked “Allow accessory to connect?”, click **Allow**."),
+                ]),
+            ],
+            footnote: "The device then appears in the Device Shots menu. The first pairing can take a minute; after that it also works over Wi‑Fi on the same network."
+        )
+    }
+
+    static let instructionsWidth: CGFloat = 360
 }
 
-extension SetupConfig {
-    /// Alert body: bold section headers, numbered steps with wrapped lines
-    /// indented under the text, and inline **bold**.
-    func formattedInstructions() -> NSAttributedString {
-        let bodyFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let boldFont = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
-        let result = NSMutableAttributedString()
+/// Shows a setup guide in its own window. Not an alert: people follow the
+/// steps on the device while reading, so it shouldn't block the app, and
+/// NSAlert switches layouts depending on content height.
+@MainActor
+enum SetupWindow {
+    private static var windows: [String: NSWindow] = [:]
 
-        func paragraph(indent: CGFloat = 0, spacingBefore: CGFloat = 0) -> NSParagraphStyle {
-            let style = NSMutableParagraphStyle()
-            style.paragraphSpacingBefore = spacingBefore
-            style.paragraphSpacing = 3
-            style.headIndent = indent
-            style.tabStops = indent > 0 ? [NSTextTab(textAlignment: .left, location: indent)] : []
-            return style
+    static func show(_ config: SetupConfig) {
+        defer { NSApp.activate() }
+        if let window = windows[config.title] {
+            window.makeKeyAndOrderFront(nil)
+            return
         }
+        let host = NSHostingController(rootView: SetupWindowContent(config: config) {
+            windows[config.title]?.close()
+        })
+        host.sizingOptions = .preferredContentSize
+        let window = NSWindow(contentViewController: host)
+        window.title = "Set up your \(config.title)"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        windows[config.title] = window
+    }
+}
 
-        func append(_ markdown: String, style: NSParagraphStyle, color: NSColor = .labelColor) {
-            // Split on ** so odd-numbered pieces are the bold spans.
-            for (index, piece) in markdown.components(separatedBy: "**").enumerated() {
-                result.append(NSAttributedString(string: piece, attributes: [
-                    .font: index.isMultiple(of: 2) ? bodyFont : boldFont,
-                    .foregroundColor: color,
-                    .paragraphStyle: style,
-                ]))
+/// Window body: the guide plus a Done button.
+struct SetupWindowContent: View {
+    let config: SetupConfig
+    var onDone: () -> Void = {}
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 16) {
+            SetupGuideView(config: config)
+            Button("Done", action: onDone)
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(24)
+    }
+}
+
+/// Body of the setup alert; also used by previews and snapshots.
+struct SetupGuideView: View {
+    let config: SetupConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            ForEach(Array(numberedSections.enumerated()), id: \.offset) { _, section in
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(section.header.uppercased())
+                        .font(.caption.weight(.semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(section.steps.enumerated()), id: \.offset) { _, item in
+                        SetupStepRow(step: item.step, number: item.number)
+                    }
+                }
             }
-            result.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
-        }
 
-        var stepNumber = 0
-        for (sectionIndex, section) in sections.enumerated() {
-            append("**\(section.header)**", style: paragraph(spacingBefore: sectionIndex == 0 ? 0 : 10))
-            for step in section.steps {
-                stepNumber += 1
-                append("\(stepNumber).\t\(step)", style: paragraph(indent: 18))
+            // Same columns as the steps: icon under the badges, text under the titles.
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "info.circle")
+                    .frame(width: 20)
+                Text(config.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .font(.callout)
+            .foregroundStyle(.secondary)
         }
-        append(footnote, style: paragraph(spacingBefore: 10), color: .secondaryLabelColor)
-
-        // Drop the trailing newline.
-        result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1))
-        return result
+        .frame(width: SetupConfig.instructionsWidth, alignment: .leading)
+        .padding(.vertical, 8)
     }
 
-    static let instructionsWidth: CGFloat = 340
+    /// Numbers run across sections and skip steps that are already done.
+    private var numberedSections: [(header: String, steps: [(step: SetupStep, number: Int?)])] {
+        var next = 1
+        return config.sections.map { section in
+            (section.header, section.steps.map { step in
+                guard !step.isDone else { return (step, nil) }
+                defer { next += 1 }
+                return (step, next)
+            })
+        }
+    }
+}
 
-    /// The alert's body label; also used by previews and snapshots.
-    @MainActor
-    func makeInstructionsLabel() -> NSTextField {
-        let label = NSTextField(wrappingLabelWithString: "")
-        label.attributedStringValue = formattedInstructions()
-        label.isSelectable = true  // so the install command can be copied
-        label.preferredMaxLayoutWidth = Self.instructionsWidth
-        label.frame.size = NSSize(width: Self.instructionsWidth, height: label.fittingSize.height)
-        return label
+private struct SetupStepRow: View {
+    let step: SetupStep
+    let number: Int?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            badge
+            VStack(alignment: .leading, spacing: 4) {
+                Text(step.title)
+                    .fontWeight(.semibold)
+                if let detail = step.detail {
+                    Text((try? AttributedString(markdown: detail)) ?? AttributedString(detail))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let command = step.command {
+                    Text(command)
+                        .font(.callout.monospaced())
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
+                        .padding(.top, 2)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
-    @MainActor
-    func showAlert() {
-        let alert = NSAlert()
-        alert.messageText = "Set up your \(title)"
-        alert.accessoryView = makeInstructionsLabel()
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+    @ViewBuilder
+    private var badge: some View {
+        if let number {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(Color.accentColor))
+        } else {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 17))
+                .foregroundStyle(.green)
+                .frame(width: 20)
+        }
     }
 }
