@@ -13,10 +13,10 @@ final class SlotStateTests: XCTestCase {
         state.slots.map { $0.device?.persistentID }
     }
 
-    func testNewPhysicalDevicesGetNewSlotsAndSimulatorsDoNot() {
+    func testNewDevicesGetNewSlotsIncludingBootedSimulators() {
         let state = SlotState().reconciled(with: [pixel, simulator, iphone])
 
-        XCTAssertEqual(ids(state), ["adb-1", "IPHONE"])
+        XCTAssertEqual(ids(state), ["adb-1", "SIM", "IPHONE"])
     }
 
     func testNoSlotLimit() {
@@ -138,6 +138,67 @@ final class SlotStateTests: XCTestCase {
         XCTAssertEqual(state.shortcut(.capture, slot: 0), cmd1)
     }
 
+    func testRecordShortcutIsRefusedOnDevicesThatCannotRecord() {
+        var state = SlotState().reconciled(with: [iphone, pixel])   // slot 0 iPhone, slot 1 Pixel
+
+        state.setShortcut(cmd1, kind: .record, slot: 0)
+        state.setShortcut(cmd2, kind: .record, slot: 1)
+
+        XCTAssertNil(state.shortcut(.record, slot: 0))
+        XCTAssertEqual(state.shortcut(.record, slot: 1), cmd2)
+    }
+
+    func testMovingUnrecordableDeviceIntoSlotClearsItsRecordShortcut() {
+        var state = SlotState().reconciled(with: [pixel, iphone])   // slot 0 Pixel, slot 1 iPhone
+        state.setShortcut(cmd1, kind: .record, slot: 0)
+        state.setShortcut(cmd2, kind: .capture, slot: 0)
+
+        state.move(from: 1, to: 0)                                   // iPhone takes Pixel's slot
+
+        XCTAssertEqual(ids(state), ["IPHONE", "adb-1"])
+        XCTAssertNil(state.shortcut(.record, slot: 0))
+        XCTAssertEqual(state.shortcut(.capture, slot: 0), cmd2)      // other shortcuts stay
+    }
+
+    func testRecordShortcutSurvivesMovingRecordableDevices() {
+        var state = SlotState().reconciled(with: [pixel, simulator])
+        state.setShortcut(cmd1, kind: .record, slot: 0)
+
+        state.move(from: 1, to: 0)
+
+        XCTAssertEqual(ids(state), ["SIM", "adb-1"])
+        XCTAssertEqual(state.shortcut(.record, slot: 0), cmd1)
+    }
+
+    func testUnrecordableDeviceAutoAssignedToSlotDropsItsRecordShortcut() {
+        var state = SlotState()
+        state.setShortcut(cmd1, kind: .record, slot: 0)              // shortcut-only slot
+
+        state = state.reconciled(with: [iphone])
+
+        XCTAssertEqual(ids(state), ["IPHONE"])
+        XCTAssertNil(state.shortcut(.record, slot: 0))
+    }
+
+    func testRecordShortcutCountsAsUsedAndRoundTrips() throws {
+        var state = SlotState()
+        state.setShortcut(cmd1, kind: .record, slot: 0)
+        XCTAssertEqual(state.slots.count, 1)
+
+        let decoded = try JSONDecoder().decode(SlotState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(decoded, state)
+
+        state.setShortcut(nil, kind: .record, slot: 0)
+        XCTAssertTrue(state.slots.isEmpty)
+    }
+
+    func testStateSavedBeforeRecordShortcutsStillDecodes() throws {
+        let legacy = #"{"slots":[{"id":"\#(UUID().uuidString)","capture":null}],"cleared":[]}"#
+        let decoded = try JSONDecoder().decode(SlotState.self, from: Data(legacy.utf8))
+        XCTAssertEqual(decoded.slots.count, 1)
+        XCTAssertNil(decoded.slots[0].record)
+    }
+
     func testUnavailableDevicesAreNotAutoAssigned() {
         let unauthorized = Device(id: "adb-2", name: "adb-2", detail: "", kind: .android, available: false)
 
@@ -148,9 +209,10 @@ final class SlotStateTests: XCTestCase {
         var state = SlotState().reconciled(with: [pixel, iphone])
         state.move(from: 0, to: 1)                               // iPhone first, Pixel second
 
-        let ordered = state.ordered([pixel, simulator, iphone])
+        let extra = Device(id: "EXTRA", name: "Extra", detail: "", kind: .ios, available: true)
+        let ordered = state.ordered([pixel, extra, iphone])
 
-        XCTAssertEqual(ordered.map(\.device.id), ["IPHONE", "adb-1", "SIM"])
+        XCTAssertEqual(ordered.map(\.device.id), ["IPHONE", "adb-1", "EXTRA"])
         XCTAssertEqual(ordered.map(\.slot), [0, 1, nil])
     }
 
@@ -183,5 +245,28 @@ final class SlotStateTests: XCTestCase {
         let decoded = try JSONDecoder().decode(SlotState.self, from: JSONEncoder().encode(state))
 
         XCTAssertEqual(decoded, state)
+    }
+
+    private func box(_ type: String, size: Int) -> Data {
+        var data = Data([UInt8(size >> 24 & 0xFF), UInt8(size >> 16 & 0xFF), UInt8(size >> 8 & 0xFF), UInt8(size & 0xFF)])
+        data.append(Data(type.utf8))
+        data.append(Data(count: size - 8))
+        return data
+    }
+
+    func testMP4CompletenessNeedsMoovBox() throws {
+        let dir = FileManager.default.temporaryDirectory
+        let good = dir.appendingPathComponent("good-\(UUID().uuidString).mp4")
+        let cutOff = dir.appendingPathComponent("cut-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: good); try? FileManager.default.removeItem(at: cutOff) }
+
+        try (box("ftyp", size: 24) + box("mdat", size: 100) + box("moov", size: 40)).write(to: good)
+        // A killed screenrecord leaves media data with a bogus size and no index.
+        var truncated = box("ftyp", size: 24) + box("free", size: 32)
+        truncated.append(Data([0x3F, 0x3F, 0x3F, 0x3F]) + Data("mdat".utf8) + Data(count: 64))
+        try truncated.write(to: cutOff)
+
+        XCTAssertTrue(MP4.isComplete(good))
+        XCTAssertFalse(MP4.isComplete(cutOff))
     }
 }

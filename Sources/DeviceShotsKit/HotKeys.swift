@@ -191,50 +191,52 @@ enum KeyDisplay {
 
 // MARK: - Recorder control (CleanShot-style "Record shortcut" button)
 
+/// One shortcut button. Click to record: Esc cancels, Delete removes the
+/// shortcut. An unavailable button (e.g. Record screen on a device that can't
+/// record) shows "n/a" and does nothing.
 struct ShortcutRecorder: View {
-    /// Fixed trailing slot for the clear button, reserved even when hidden so
-    /// column headers can align with the record button (see `ShortcutColumnHeader`).
-    static let clearSlotWidth: CGFloat = 16
-    static let spacing: CGFloat = 4
-
     @Binding var shortcut: Shortcut?
+    var isAvailable = true
     @State private var isRecording = false
     @State private var monitor: Any?
 
     var body: some View {
-        HStack(spacing: Self.spacing) {
-            Button(action: { isRecording ? stopRecording() : startRecording() }) {
-                Text(isRecording ? "Type…" : (shortcut?.display ?? "Record"))
-                    .font(.callout.monospaced())
-                    .foregroundStyle(labelColor)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(isRecording ? Color.accentColor : .clear, lineWidth: 1.5)
-            )
-
-            Button {
-                shortcut = nil
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .frame(width: Self.clearSlotWidth)
-            .opacity(shortcut != nil && !isRecording ? 1 : 0)
-            .disabled(shortcut == nil || isRecording)
+        Button(action: { isRecording ? stopRecording() : startRecording() }) {
+            Text(label)
+                .font(.callout.monospaced())
+                .foregroundStyle(labelColor)
+                .frame(maxWidth: .infinity)
         }
+        .buttonStyle(.bordered)
+        .disabled(!isAvailable)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isRecording ? Color.accentColor : .clear, lineWidth: 1.5)
+        )
         .onDisappear { stopRecording() }
+        .help(helpText)
+    }
+
+    private var label: String {
+        if !isAvailable { return "n/a" }
+        if isRecording { return "Record…" }
+        return shortcut?.display ?? "—"
     }
 
     private var labelColor: Color {
+        if !isAvailable { return .secondary.opacity(0.6) }
         if isRecording { return .accentColor }
         return shortcut == nil ? .secondary : .primary
     }
 
+    private var helpText: String {
+        if !isAvailable { return "This device can't record video" }
+        if isRecording { return "Type a shortcut. Esc cancels, Delete removes it." }
+        return shortcut == nil ? "Click to set a shortcut" : "Click to change the shortcut"
+    }
+
     private func startRecording() {
+        stopRecording()
         isRecording = true
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             handle(event)
@@ -258,7 +260,7 @@ struct ShortcutRecorder: View {
             stopRecording()
             return
         }
-        if event.keyCode == 51 && flags.isEmpty { // Delete clears
+        if (event.keyCode == 51 || event.keyCode == 117) && flags.isEmpty { // Delete removes
             shortcut = nil
             stopRecording()
             return
@@ -274,16 +276,13 @@ struct ShortcutRecorder: View {
     }
 }
 
-/// Column title centered over the record button, not the whole recorder.
+/// Column title centered over its shortcut button; wraps to two lines.
 struct ShortcutColumnHeader: View {
     let title: String
 
     var body: some View {
-        HStack(spacing: ShortcutRecorder.spacing) {
-            Text(title)
-                .frame(maxWidth: .infinity)
-            Color.clear
-                .frame(width: ShortcutRecorder.clearSlotWidth, height: 1)
-        }
+        Text(title)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
     }
 }

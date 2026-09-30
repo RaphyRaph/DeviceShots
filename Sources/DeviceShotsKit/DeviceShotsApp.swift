@@ -64,6 +64,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
     private var storeObserver: AnyCancellable?
     private var captureObserver: AnyCancellable?
     private var errorObserver: AnyCancellable?
+    private var recordingObserver: AnyCancellable?
 
     init(store: DeviceStore) {
         self.store = store
@@ -86,6 +87,12 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             .sink { [weak self] isCapturing in
                 self?.updateIcon(isCapturing: isCapturing)
             }
+        recordingObserver = VideoRecorder.shared.$recording
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateIcon(isCapturing: self?.store.isCapturingAnyDevice ?? false)
+                self?.rebuildMenu()
+            }
         errorObserver = store.$errorFeedbackSequence
             .dropFirst()
             .receive(on: RunLoop.main)
@@ -103,6 +110,19 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
 
     private func rebuildMenu() {
         menu.removeAllItems()
+
+        let recorder = VideoRecorder.shared
+        let recordingDevices = store.devices.filter { recorder.isRecording($0) }
+        for device in recordingDevices {
+            let stop = NSMenuItem(title: "Stop Recording \(device.name)", action: #selector(toggleRecording(_:)), keyEquivalent: "")
+            stop.target = self
+            stop.representedObject = device
+            applyShortcut(.record, of: device, to: stop)
+            stop.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop recording")?
+                .withSymbolConfiguration(.init(paletteColors: [.systemRed]))
+            menu.addItem(stop)
+        }
+        if !recordingDevices.isEmpty { menu.addItem(.separator()) }
 
         if store.devices.isEmpty {
             let scanning = NSMenuItem(title: "Scanning for devices…", action: nil, keyEquivalent: "")
@@ -133,6 +153,24 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
             }
         }
 
+        let recordable = store.devices.filter { $0.canRecordVideo && $0.available && !recorder.isRecording($0) }
+        if !recordable.isEmpty {
+            menu.addItem(.separator())
+            let submenu = NSMenu()
+            for device in recordable {
+                let item = NSMenuItem(title: device.name, action: #selector(toggleRecording(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = device
+                item.image = NSImage(systemSymbolName: device.icon, accessibilityDescription: device.name)
+                applyShortcut(.record, of: device, to: item)
+                submenu.addItem(item)
+            }
+            let parent = NSMenuItem(title: "Record Video", action: nil, keyEquivalent: "")
+            parent.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Record Video")
+            parent.submenu = submenu
+            menu.addItem(parent)
+        }
+
         menu.addItem(.separator())
         addSetupItem(for: .ios, whenMissingFrom: menu)
         addSetupItem(for: .android, whenMissingFrom: menu)
@@ -146,8 +184,19 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(quit)
     }
 
+    /// Shows the device's slot shortcut of this kind as a native key equivalent.
+    private func applyShortcut(_ kind: ShortcutKind, of device: Device, to item: NSMenuItem) {
+        let state = SlotStore.shared.state
+        guard let slot = state.slotIndex(of: device.persistentID),
+              let shortcut = state.shortcut(kind, slot: slot)
+        else { return }
+        item.keyEquivalent = shortcut.menuKeyEquivalent
+        item.keyEquivalentModifierMask = shortcut.modifierFlags
+    }
+
     private func deviceSubtitle(_ device: Device) -> String {
-        store.status[device.id]?.message ?? (device.available ? device.detail : "Not connected")
+        if VideoRecorder.shared.isRecording(device) { return "● Recording…" }
+        return store.status[device.id]?.message ?? (device.available ? device.detail : "Not connected")
     }
 
     private func updateIcon(isCapturing: Bool) {
@@ -159,7 +208,15 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         else { return }
 
         image.isTemplate = true
-        button.setAccessibilityLabel(isCapturing ? "Capturing screenshot" : "Device Shots")
+        let isRecording = !VideoRecorder.shared.recording.isEmpty
+        button.setAccessibilityLabel(isRecording ? "Recording video" : isCapturing ? "Capturing screenshot" : "Device Shots")
+        if isRecording,
+           let red = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording video")?
+            .withSymbolConfiguration(.init(pointSize: 18, weight: .regular).applying(.init(paletteColors: [.systemRed]))) {
+            red.isTemplate = false
+            button.image = red
+            return
+        }
         button.image = image
         button.layer?.removeAnimation(forKey: "capturePulse")
     }
@@ -191,6 +248,11 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         Task { await store.capture(device) }
     }
 
+    @objc private func toggleRecording(_ sender: NSMenuItem) {
+        guard let device = sender.representedObject as? Device else { return }
+        VideoRecorder.shared.toggle(device)
+    }
+
     @objc private func showSettings(_ sender: NSMenuItem) {
         SettingsOpener.open()
     }
@@ -211,6 +273,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         storeObserver = nil
         captureObserver = nil
         errorObserver = nil
+        recordingObserver = nil
         menu.delegate = nil
         CaptureHUD.shared.tearDown()
         NSStatusBar.system.removeStatusItem(statusItem)
@@ -255,6 +318,7 @@ public final class AppLifecycle: NSObject, NSApplicationDelegate {
         statusItemController?.tearDown()
         statusItemController = nil
         HotKeyCenter.shared.unregisterAll()
+        VideoRecorder.shared.stopAllForShutdown()
         CommandProcessRegistry.shared.terminateAll()
         ADBServerLifecycle.shared.stopIfOwned(adbPath)
     }
@@ -302,17 +366,17 @@ final class DeviceStore: ObservableObject {
         devices.first { $0.persistentID == persistentID && $0.available }
     }
 
-    /// Entry point for global shortcuts: capture the device remembered in a
-    /// slot, optionally pasting into the frontmost app afterwards.
-    /// Uses the cached device list so hotkeys don't wait on rediscovery.
-    func captureSlot(_ slot: Int, thenPaste: Bool = false) async {
+    /// Resolves the device remembered in a slot for a global shortcut, using
+    /// the cached device list so hotkeys don't wait on rediscovery. Signals an
+    /// error and returns nil when the slot is empty or its device is gone.
+    private func connectedDevice(inSlot slot: Int) async -> Device? {
         if LatencyOpts.forceHotkeyRefresh || !hasLoadedOnce {
             await refresh()
         }
         let slots = SlotStore.shared.state.slots
         guard slots.indices.contains(slot), let id = slots[slot].device?.persistentID else {
             signalError()
-            return
+            return nil
         }
         var device = connectedDevice(persistentID: id)
         if device == nil {
@@ -322,9 +386,27 @@ final class DeviceStore: ObservableObject {
         }
         guard let device else {
             signalError()
+            return nil
+        }
+        return device
+    }
+
+    /// Entry point for global shortcuts: capture the device remembered in a
+    /// slot, optionally pasting into the frontmost app afterwards.
+    func captureSlot(_ slot: Int, thenPaste: Bool = false) async {
+        guard let device = await connectedDevice(inSlot: slot) else { return }
+        _ = await capture(device, thenPaste: thenPaste)
+    }
+
+    /// Record-screen shortcut: starts recording the slot's device, or stops it
+    /// if it's already recording.
+    func toggleRecordingSlot(_ slot: Int) async {
+        guard let device = await connectedDevice(inSlot: slot) else { return }
+        guard device.canRecordVideo else {
+            signalError()
             return
         }
-        _ = await capture(device, thenPaste: thenPaste)
+        VideoRecorder.shared.toggle(device)
     }
 
     /// Sends ⌘V to the frontmost app. Returns false when Accessibility access
@@ -394,7 +476,7 @@ final class DeviceStore: ObservableObject {
         return succeeded
     }
 
-    private func signalError() {
+    func signalError() {
         errorFeedbackSequence &+= 1
         NSSound(named: "Tink")?.play()
     }
@@ -562,7 +644,7 @@ private func writeScreenshotFile(
     return url
 }
 
-private func screenshotFilenameBase(_ deviceName: String, includeDevice: Bool) -> String {
+func screenshotFilenameBase(_ deviceName: String, includeDevice: Bool) -> String {
     guard includeDevice else { return "Screenshot" }
     let unsafeCharacters = CharacterSet(charactersIn: "/:\u{0}")
     let cleaned = deviceName.components(separatedBy: unsafeCharacters)

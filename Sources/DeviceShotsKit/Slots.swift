@@ -15,6 +15,9 @@ struct SlottedDevice: Codable, Equatable {
         kind = device.kind
         isTablet = device.isTablet
     }
+
+    /// Mirrors `Device.canRecordVideo`; physical iOS devices can't record.
+    var canRecordVideo: Bool { kind != .ios }
 }
 
 /// A row in the shortcuts list: an optional device and the slot's shortcuts.
@@ -24,12 +27,14 @@ struct Slot: Codable, Equatable, Identifiable {
     var device: SlottedDevice?
     var capture: Shortcut?
     var paste: Shortcut?
+    /// Toggles screen recording. Never set while the slot's device can't record.
+    var record: Shortcut?
 
-    var isUnused: Bool { device == nil && capture == nil && paste == nil }
+    var isUnused: Bool { device == nil && capture == nil && paste == nil && record == nil }
 }
 
 enum ShortcutKind {
-    case capture, paste
+    case capture, paste, record
 }
 
 /// Growable list of shortcut slots and the rules for filling them.
@@ -48,9 +53,10 @@ struct SlotState: Codable, Equatable {
     }
 
     /// Applies a discovery pass: refreshes remembered names, re-arms cleared
-    /// devices that have disconnected, and puts newly seen physical devices
-    /// into the first slot without a device (inheriting its shortcuts), or a
-    /// new slot at the end. Simulators are never auto-assigned.
+    /// devices that have disconnected, and puts newly seen devices into the
+    /// first slot without a device (inheriting its shortcuts), or a new slot
+    /// at the end. Discovery only reports simulators that are booted, so a
+    /// simulator gets a slot when it boots, not merely because it exists.
     func reconciled(with devices: [Device]) -> SlotState {
         var next = self
         let connected = devices.filter(\.available)
@@ -63,7 +69,7 @@ struct SlotState: Codable, Equatable {
             next.slots[index].device = SlottedDevice(match)
         }
 
-        for device in connected where device.kind != .simulator {
+        for device in connected {
             guard next.slotIndex(of: device.persistentID) == nil,
                   !next.cleared.contains(device.persistentID)
             else { continue }
@@ -73,6 +79,7 @@ struct SlotState: Codable, Equatable {
                 next.slots.append(Slot(device: SlottedDevice(device)))
             }
         }
+        next.dropUnusableRecordShortcuts()
         next.compact()
         return next
     }
@@ -95,6 +102,7 @@ struct SlotState: Codable, Equatable {
         let device = slots[from].device
         slots[from].device = slots[to].device
         slots[to].device = device
+        dropUnusableRecordShortcuts()
         compact()
     }
 
@@ -107,7 +115,9 @@ struct SlotState: Codable, Equatable {
         switch kind {
         case .capture: slots[slot].capture = shortcut
         case .paste: slots[slot].paste = shortcut
+        case .record: slots[slot].record = shortcut
         }
+        dropUnusableRecordShortcuts()
         compact()
     }
 
@@ -116,6 +126,7 @@ struct SlotState: Codable, Equatable {
         switch kind {
         case .capture: return slots[slot].capture
         case .paste: return slots[slot].paste
+        case .record: return slots[slot].record
         }
     }
 
@@ -129,6 +140,15 @@ struct SlotState: Codable, Equatable {
             .filter { slotIndex(of: $0.persistentID) == nil }
             .map { (device: $0, slot: Int?.none) }
         return slotted + rest
+    }
+
+    /// A device that can't record must not hold a record shortcut, whether it
+    /// was moved into the slot, auto-assigned to it, or the shortcut was set
+    /// on it directly.
+    private mutating func dropUnusableRecordShortcuts() {
+        for index in slots.indices where slots[index].device?.canRecordVideo == false {
+            slots[index].record = nil
+        }
     }
 
     private mutating func compact() {
@@ -147,7 +167,7 @@ final class SlotStore: ObservableObject {
             save()
             // Hotkeys are bound to slot positions, so re-register when any
             // slot's shortcuts change or slots are added/removed.
-            if state.slots.map({ [$0.capture, $0.paste] }) != oldValue.slots.map({ [$0.capture, $0.paste] }) {
+            if state.slots.map({ [$0.capture, $0.paste, $0.record] }) != oldValue.slots.map({ [$0.capture, $0.paste, $0.record] }) {
                 registerHotKeys()
             }
         }
@@ -240,6 +260,11 @@ final class SlotStore: ObservableObject {
             if let paste = slot.paste {
                 HotKeyCenter.shared.register(paste) {
                     Task { @MainActor in await DeviceStore.shared.captureSlot(index, thenPaste: true) }
+                }
+            }
+            if let record = slot.record {
+                HotKeyCenter.shared.register(record) {
+                    Task { @MainActor in await DeviceStore.shared.toggleRecordingSlot(index) }
                 }
             }
         }

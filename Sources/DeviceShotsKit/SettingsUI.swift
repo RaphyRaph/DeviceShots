@@ -204,7 +204,7 @@ struct ShortcutSlotsList: View {
     /// Shows the drag grip on this row as if hovered (previews/snapshots).
     var forceHoverSlot: Int?
 
-    private let columnWidth: CGFloat = 120
+    private let columnWidth: CGFloat = 100
 
     var body: some View {
         Form {
@@ -212,9 +212,11 @@ struct ShortcutSlotsList: View {
                 HStack(spacing: 8) {
                     Text("Device")
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    ShortcutColumnHeader(title: "Capture")
+                    ShortcutColumnHeader(title: "Screenshot")
                         .frame(width: columnWidth)
-                    ShortcutColumnHeader(title: "Capture & Paste")
+                    ShortcutColumnHeader(title: "Screenshot & paste")
+                        .frame(width: columnWidth)
+                    ShortcutColumnHeader(title: "Record screen")
                         .frame(width: columnWidth)
                 }
                 .font(.caption)
@@ -243,6 +245,9 @@ struct ShortcutSlotsList: View {
             ShortcutRecorder(shortcut: binding(slot.capture, .capture, index))
                 .frame(width: columnWidth)
             ShortcutRecorder(shortcut: binding(slot.paste, .paste, index))
+                .frame(width: columnWidth)
+            ShortcutRecorder(shortcut: binding(slot.record, .record, index),
+                             isAvailable: slot.device?.canRecordVideo ?? true)
                 .frame(width: columnWidth)
         }
     }
@@ -307,6 +312,8 @@ private struct SlotDeviceCell: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
+                .opacity(isHovering || forceHover ? 1 : 0)
+                .allowsHitTesting(isHovering || forceHover)
                 .help("Free this slot")
                 .accessibilityLabel("Remove \(slotted.name) from this slot")
             }

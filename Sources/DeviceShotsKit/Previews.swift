@@ -24,12 +24,13 @@ enum Fixtures {
     static let optCmd1 = Shortcut(keyCode: 18, modifiers: NSEvent.ModifierFlags([.option, .command]).rawValue)
     static let optCmd2 = Shortcut(keyCode: 19, modifiers: NSEvent.ModifierFlags([.option, .command]).rawValue)
     static let shiftCmd3 = Shortcut(keyCode: 20, modifiers: NSEvent.ModifierFlags([.shift, .command]).rawValue)
+    static let optCmd3 = Shortcut(keyCode: 20, modifiers: NSEvent.ModifierFlags([.option, .command]).rawValue)
     static let ctrlCmd9 = Shortcut(keyCode: 25, modifiers: NSEvent.ModifierFlags([.control, .command]).rawValue)
 
     /// Connected + disconnected devices, and a slot with shortcuts but no device.
     static let slots: [Slot] = [
         Slot(device: iphone, paste: optCmd1),
-        Slot(device: pixel, capture: shiftCmd3, paste: optCmd2),
+        Slot(device: pixel, capture: shiftCmd3, paste: optCmd2, record: optCmd3),
         Slot(device: ipad),
         Slot(capture: ctrlCmd9),
     ]
